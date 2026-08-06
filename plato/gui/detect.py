@@ -5,6 +5,19 @@ patterns/layouts already known to the indexing layer (``compile_pattern``,
 ``read_platemap``) against the real files and keeps the first one that
 actually parses something. If nothing matches, the caller falls back to
 asking the user — this module only saves that step when it can.
+
+To support a new screen naming convention, add one entry to a list below and
+nothing else needs to change:
+
+* A new filename layout (e.g. a different microscope's export format) ->
+  add a regex to ``KNOWN_FILENAME_PATTERNS``. It must capture ``well`` and
+  may capture any of ``plate, field, channel, z, seq, point``.
+* A new way a plate map cell packs several fields into one string (e.g.
+  "<gene>_<replicate>", "<antibiotic>\\n<concentration>") -> add a named-group
+  regex to ``KNOWN_SPLIT_PATTERNS``. Whichever pattern splits the most cells
+  on the real file wins, so this is what makes the sidebar filters (gene,
+  antibiotic, concentration, ...) adapt automatically to whichever dataset
+  was loaded — no per-dataset configuration needed.
 """
 
 from __future__ import annotations
@@ -38,10 +51,21 @@ KNOWN_FILENAME_PATTERNS: list[str] = [
 COMMON_GLOBS = ["**/*.tif*"]
 COMMON_WELL_COLUMNS = ["Well", "well", "WELL"]
 
-# Matrix cells often pack a condition and a replicate index into one string,
-# e.g. "ftsZ_2" or "ACE-1 NC_6" — this is the split used throughout the docs
-# and example configs, so it is the first (and currently only) guess tried.
+# Matrix cells pack more than one field into a single string, in more than
+# one convention depending on the screen. Each entry here is tried against
+# the real plate map; whichever splits the most cells wins, so the sidebar
+# filters (gene/replicate for a mutant screen, antibiotic/concentration for
+# a compound screen, ...) adapt to whichever dataset was actually loaded.
 GENE_REPLICATE_SPLIT = r"^(?P<gene>.+)_(?P<replicate>\d+)$"
+# "Ciprofloxacin\n1/2x", "Cefepime\n1x" — antibiotic name and a fractional-MIC
+# concentration on the next line. Control wells ("WT", "WT NC") have no
+# concentration line and are correctly left unsplit, not misparsed.
+ANTIBIOTIC_CONCENTRATION_SPLIT = r"^(?P<antibiotic>[^\n]+)\n(?P<concentration>.+)$"
+
+KNOWN_SPLIT_PATTERNS: list[str] = [
+    GENE_REPLICATE_SPLIT,
+    ANTIBIOTIC_CONCENTRATION_SPLIT,
+]
 
 
 @dataclass(slots=True)
@@ -81,11 +105,13 @@ def detect_platemap_layout(
 ) -> PlatemapGuess | None:
     """Guess "long" (a Well column) vs "matrix" (a headerless plate grid).
 
-    For a matrix layout, also try splitting each cell as "<gene>_<replicate>"
-    (the packed-condition format used throughout this project) — most cells
-    matching means real metadata columns (gene, replicate, ...) get indexed
-    instead of one opaque "condition" column, which is what the sidebar
-    filters are built from.
+    For a matrix layout, also try every pattern in KNOWN_SPLIT_PATTERNS and
+    keep whichever splits the most cells (control wells like "WT" are allowed
+    to stay unsplit and don't count against a pattern). This is what makes
+    the sidebar filters adapt per dataset: gene/replicate for a mutant screen
+    that packs "ftsZ_2" into a cell, antibiotic/concentration for a compound
+    screen that packs "Ciprofloxacin\\n1/2x" into a cell, and so on — instead
+    of everything collapsing into one opaque "condition" column.
     """
     for well_column in COMMON_WELL_COLUMNS:
         try:
@@ -113,20 +139,32 @@ def detect_platemap_layout(
     if len(plain.frame) == 0:
         return None
 
-    try:
-        split = read_platemap(
-            path,
-            layout="matrix",
-            header_row=False,
-            index_col=False,
-            split_pattern=GENE_REPLICATE_SPLIT,
-            plate_format=plate_format,
-        )
-    except ValueError:
-        split = None
-    if split is not None and len(split.frame) > 0 and len(split.unsplit_values) < len(split.frame) / 2:
+    best_pattern: str | None = None
+    best_split_count = 0
+    for pattern in KNOWN_SPLIT_PATTERNS:
+        try:
+            split = read_platemap(
+                path,
+                layout="matrix",
+                header_row=False,
+                index_col=False,
+                split_pattern=pattern,
+                plate_format=plate_format,
+            )
+        except ValueError:
+            continue
+        if len(split.frame) == 0:
+            continue
+        split_count = len(split.frame) - len(split.unsplit_values)
+        # Require most cells to actually split; a pattern that "matches" by
+        # accident on a handful of cells isn't worth adopting over no split.
+        if split_count > best_split_count and split_count >= len(split.frame) / 2:
+            best_pattern = pattern
+            best_split_count = split_count
+
+    if best_pattern is not None:
         return PlatemapGuess(
-            layout="matrix", header_row=False, index_col=False, split_pattern=GENE_REPLICATE_SPLIT
+            layout="matrix", header_row=False, index_col=False, split_pattern=best_pattern
         )
 
     return PlatemapGuess(layout="matrix", header_row=False, index_col=False)
