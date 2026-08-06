@@ -146,7 +146,7 @@ to gate a pipeline on a clean join.
 | Ctrl+B | blinded review |
 | ←/→ (viewer) | step through the current filter |
 | A (viewer) | per-image autoscale |
-| M (viewer) | mask overlay |
+| S (viewer) | toggle scale bar |
 
 ## Two things that are deliberate, not oversights
 

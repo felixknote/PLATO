@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
 
 from ..config import Config
 from ..index.db import ImageRow
+from .scalebar import bar_length_um
+from .settings import get_nm_per_pixel, get_scale_bar_fraction
 
 pg.setConfigOption("imageAxisOrder", "row-major")
 
@@ -37,26 +39,6 @@ def _load_stack(path: Path) -> np.ndarray:
     if array.ndim > 3:
         array = array.reshape(-1, *array.shape[-2:])
     return array
-
-
-def mask_path_for(cfg: Config, row: ImageRow) -> Path | None:
-    if not cfg.masks.enabled:
-        return None
-    stem = Path(row.path).stem
-    try:
-        name = cfg.masks.pattern.format(
-            stem=stem,
-            plate=row.plate,
-            well=row.well,
-            row=row.well[0],
-            col=row.well[1:],
-            field=row.field or "",
-            channel=row.channel or "",
-        )
-    except KeyError:
-        return None
-    candidate = Path(cfg.masks.dir) / name
-    return candidate if candidate.exists() else None
 
 
 class ImageWindow(QMainWindow):
@@ -84,11 +66,9 @@ class ImageWindow(QMainWindow):
         self.image_view.ui.roiBtn.hide()
         self.image_view.ui.menuBtn.hide()
 
-        self.mask_item = pg.ImageItem()
-        self.mask_item.setZValue(10)
-        self.mask_item.setOpacity(0.45)
-        self.image_view.getView().addItem(self.mask_item)
-        self.mask_item.hide()
+        self.scale_bar = pg.ScaleBar(size=1, suffix="m", offset=(-20, -20))
+        self.scale_bar.setParentItem(self.image_view.getView())
+        self.scale_bar.hide()
 
         self.metadata_label = QLabel()
         self.metadata_label.setWordWrap(True)
@@ -105,14 +85,33 @@ class ImageWindow(QMainWindow):
         )
         self.autoscale_box.toggled.connect(self._set_autoscale)
 
-        self.mask_box = QCheckBox("Show mask overlay (M)")
-        self.mask_box.toggled.connect(self._set_mask_visible)
-        self.mask_box.setEnabled(cfg.masks.enabled)
+        self.scale_bar_box = QCheckBox("Show scale bar (S)")
+        self.scale_bar_box.toggled.connect(self._set_scale_bar_visible)
+
+        self.measure_box = QCheckBox("Measure distance (D)")
+        self.measure_box.setToolTip(
+            "Click two points on the image to measure the distance between them "
+            "(in pixels, and in µm using the pixel size from Settings)."
+        )
+        self.measure_box.toggled.connect(self._set_measure_active)
+
+        self.measure_line = pg.PlotDataItem(pen=pg.mkPen("#e8a33d", width=2))
+        self.measure_line.setZValue(20)
+        self.image_view.getView().addItem(self.measure_line)
+        self.measure_line.hide()
+
+        self.measure_label = pg.TextItem(color="#e8a33d", anchor=(0.5, 1.2))
+        self.measure_label.setZValue(20)
+        self.image_view.getView().addItem(self.measure_label)
+        self.measure_label.hide()
+
+        self._measure_first_point: tuple[float, float] | None = None
 
         side = QVBoxLayout()
         side.addWidget(self.metadata_label, 1)
         side.addWidget(self.autoscale_box)
-        side.addWidget(self.mask_box)
+        side.addWidget(self.scale_bar_box)
+        side.addWidget(self.measure_box)
 
         layout = QHBoxLayout()
         layout.addWidget(self.image_view, 4)
@@ -121,13 +120,16 @@ class ImageWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
         self.setStatusBar(QStatusBar())
-        self.resize(1100, 800)
+        self.resize(1600, 1100)
 
         QShortcut(QKeySequence(Qt.Key.Key_Right), self, lambda: self.step(1))
         QShortcut(QKeySequence(Qt.Key.Key_Left), self, lambda: self.step(-1))
-        QShortcut(QKeySequence(Qt.Key.Key_M), self, self.mask_box.toggle)
         QShortcut(QKeySequence(Qt.Key.Key_A), self, self.autoscale_box.toggle)
+        QShortcut(QKeySequence(Qt.Key.Key_S), self, self.scale_bar_box.toggle)
+        QShortcut(QKeySequence(Qt.Key.Key_D), self, self.measure_box.toggle)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self.close)
+
+        self.image_view.getView().scene().sigMouseClicked.connect(self._on_scene_clicked)
 
         self.show_current()
 
@@ -160,8 +162,9 @@ class ImageWindow(QMainWindow):
         )
         view_box.setState(state)
         self._apply_levels(stack, row)
-        self._load_mask(row)
         self._update_labels(row)
+        if self.scale_bar_box.isChecked():
+            self._update_scale_bar()
 
     def _apply_levels(self, stack: np.ndarray, row: ImageRow) -> None:
         if self.autoscale:
@@ -176,23 +179,63 @@ class ImageWindow(QMainWindow):
         self.autoscale = enabled
         self.show_current()
 
-    def _set_mask_visible(self, visible: bool) -> None:
-        self.mask_item.setVisible(visible and self.mask_item.image is not None)
+    def _set_scale_bar_visible(self, visible: bool) -> None:
+        if visible:
+            self._update_scale_bar()
+            self.scale_bar.show()
+        else:
+            self.scale_bar.hide()
 
-    def _load_mask(self, row: ImageRow) -> None:
-        path = mask_path_for(self.cfg, row)
-        if path is None:
-            self.mask_item.clear()
-            self.mask_item.hide()
+    def _set_measure_active(self, active: bool) -> None:
+        self._measure_first_point = None
+        if not active:
+            self.measure_line.hide()
+            self.measure_label.hide()
+        self.statusBar().showMessage(
+            "click two points to measure" if active else "measurement off", 4000
+        )
+
+    def _on_scene_clicked(self, event) -> None:  # noqa: ANN001
+        if not self.measure_box.isChecked():
             return
-        mask = np.asarray(tifffile.imread(path))
-        while mask.ndim > 2:
-            mask = mask[0]
-        rgba = np.zeros((*mask.shape, 4), dtype=np.uint8)
-        labelled = mask > 0
-        rgba[labelled] = (255, 80, 80, 255)
-        self.mask_item.setImage(rgba, autoLevels=False)
-        self.mask_item.setVisible(self.mask_box.isChecked())
+        view_box = self.image_view.getView()
+        if not view_box.sceneBoundingRect().contains(event.scenePos()):
+            return
+        point = view_box.mapSceneToView(event.scenePos())
+        x, y = point.x(), point.y()
+
+        if self._measure_first_point is None:
+            self._measure_first_point = (x, y)
+            self.measure_line.setData([x], [y])
+            self.measure_line.show()
+            self.measure_label.hide()
+            return
+
+        x0, y0 = self._measure_first_point
+        self.measure_line.setData([x0, x], [y0, y])
+        distance_px = float(np.hypot(x - x0, y - y0))
+        nm_per_pixel = get_nm_per_pixel()
+        if nm_per_pixel > 0:
+            distance_um = distance_px * nm_per_pixel / 1000.0
+            label = f"{distance_px:.1f} px = {distance_um:.3g} µm"
+        else:
+            label = f"{distance_px:.1f} px"
+        self.measure_label.setText(label)
+        self.measure_label.setPos((x0 + x) / 2, (y0 + y) / 2)
+        self.measure_label.show()
+        self.statusBar().showMessage(label, 8000)
+        self._measure_first_point = None
+
+    def _update_scale_bar(self) -> None:
+        nm_per_pixel = get_nm_per_pixel()
+        if nm_per_pixel <= 0:
+            return
+        width_px = self.image_view.getImageItem().image.shape[-1]
+        um_length = bar_length_um(width_px, nm_per_pixel, get_scale_bar_fraction())
+        px_length = um_length * 1000.0 / nm_per_pixel
+        self.scale_bar.size = px_length
+        self.scale_bar.text.setText(f"{um_length:g} µm")
+        self.scale_bar.updateBar()
 
     def _update_labels(self, row: ImageRow) -> None:
         if self.blind:
@@ -217,5 +260,5 @@ class ImageWindow(QMainWindow):
             self.metadata_label.setText("<br>".join(lines))
         scaling = "per-image" if self.autoscale else "fixed screen-wide"
         self.statusBar().showMessage(
-            f"contrast: {scaling}   ←/→ step   A autoscale   M mask   Esc close"
+            f"contrast: {scaling}   ←/→ step   A autoscale   S scale bar   D measure   Esc close"
         )

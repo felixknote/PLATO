@@ -28,12 +28,13 @@ from PIL import Image, ImageFilter
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS thumbnails (
-    image_id   TEXT PRIMARY KEY,
-    mtime      REAL NOT NULL,
-    size_bytes INTEGER NOT NULL,
-    width      INTEGER NOT NULL,
-    height     INTEGER NOT NULL,
-    png        BLOB NOT NULL
+    image_id      TEXT PRIMARY KEY,
+    mtime         REAL NOT NULL,
+    size_bytes    INTEGER NOT NULL,
+    width         INTEGER NOT NULL,
+    height        INTEGER NOT NULL,
+    png           BLOB NOT NULL,
+    autoscale_png BLOB
 );
 """
 
@@ -127,24 +128,40 @@ def scale_to_uint8(plane: np.ndarray, limits: tuple[float, float]) -> np.ndarray
     return (scaled * 255).astype(np.uint8)
 
 
+def _finish_png(plane_u8: np.ndarray, size: int) -> bytes:
+    image = Image.fromarray(plane_u8, mode="L")
+    image.thumbnail((size, size), Image.Resampling.BILINEAR)
+    image = image.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=2))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=False)
+    return buffer.getvalue()
+
+
 def render_thumbnail(
-    path: Path, limits: tuple[float, float], size: int
-) -> tuple[bytes, int, int]:
+    path: Path, limits: tuple[float, float], size: int, *, autoscale: bool = False
+) -> tuple[bytes, bytes | None, int, int]:
     """Render one file to PNG bytes using fixed display limits.
 
     A subtle unsharp mask is applied after downscaling: block-mean downscaling
     softens detail that per-image autoscaling would otherwise recover, and the
     thumbnail grid is the primary navigation view, so a little sharpening back
     keeps well-to-well differences visible at a glance.
+
+    If ``autoscale`` is set, a second PNG is also rendered using that image's
+    own percentile limits — pre-computed so the GUI's fixed/autoscale toggle
+    is an instant cache lookup rather than a live re-render.
     """
-    plane = read_plane(path).astype(np.float32)
-    plane = _downscale(plane, size)
-    image = Image.fromarray(scale_to_uint8(plane, limits), mode="L")
-    image.thumbnail((size, size), Image.Resampling.BILINEAR)
-    image = image.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=2))
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG", optimize=False)
-    return buffer.getvalue(), image.width, image.height
+    raw_plane = read_plane(path)
+    plane = _downscale(raw_plane.astype(np.float32), size)
+    png = _finish_png(scale_to_uint8(plane, limits), size)
+
+    autoscale_png = None
+    if autoscale:
+        own_limits = _percentile_limits(raw_plane.astype(np.float32), (1.0, 99.5))
+        autoscale_png = _finish_png(scale_to_uint8(plane, own_limits), size)
+
+    size_after = Image.open(io.BytesIO(png))
+    return png, autoscale_png, size_after.width, size_after.height
 
 
 def build_thumbnails(
@@ -157,6 +174,7 @@ def build_thumbnails(
     workers: int = 4,
     force: bool = False,
     verbose: bool = True,
+    autoscale: bool = True,
 ) -> int:
     """Build (or refresh) the thumbnail cache. Returns the number rendered.
 
@@ -214,12 +232,15 @@ def build_thumbnails(
 
     def render(job: ThumbnailJob):
         try:
-            png, w, h = render_thumbnail(
-                job.path, limits.get(job.channel or "_", (0.0, 1.0)), size
+            png, autoscale_png, w, h = render_thumbnail(
+                job.path,
+                limits.get(job.channel or "_", (0.0, 1.0)),
+                size,
+                autoscale=autoscale,
             )
         except Exception as exc:  # noqa: BLE001
             return job, None, str(exc)
-        return job, (png, w, h), None
+        return job, (png, autoscale_png, w, h), None
 
     failures: list[tuple[str, str]] = []
     done = 0
@@ -228,11 +249,12 @@ def build_thumbnails(
             if result is None:
                 failures.append((job.image_id, error or "unknown error"))
                 continue
-            png, w, h = result
+            png, autoscale_png, w, h = result
             con.execute(
                 "INSERT OR REPLACE INTO thumbnails "
-                "(image_id, mtime, size_bytes, width, height, png) VALUES (?, ?, ?, ?, ?, ?)",
-                (job.image_id, job.mtime, job.size_bytes, w, h, png),
+                "(image_id, mtime, size_bytes, width, height, png, autoscale_png) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (job.image_id, job.mtime, job.size_bytes, w, h, png, autoscale_png),
             )
             done += 1
             if verbose and done % 250 == 0:
@@ -257,11 +279,16 @@ class ThumbnailCache:
         self.path = path
         self.con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
 
-    def get(self, image_id: str) -> bytes | None:
+    def get(self, image_id: str, *, autoscale: bool = False) -> bytes | None:
+        column = "autoscale_png" if autoscale else "png"
         row = self.con.execute(
-            "SELECT png FROM thumbnails WHERE image_id = ?", (image_id,)
+            f"SELECT {column}, png FROM thumbnails WHERE image_id = ?", (image_id,)
         ).fetchone()
-        return row[0] if row else None
+        if row is None:
+            return None
+        # Fall back to the fixed-levels PNG if no autoscaled variant was
+        # rendered for this image (e.g. cache built with autoscale=False).
+        return row[0] if row[0] is not None else row[1]
 
     def close(self) -> None:
         self.con.close()

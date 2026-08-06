@@ -106,10 +106,6 @@ size = 64
 percentiles = [1.0, 99.5]
 sample_size = 20
 
-[masks]
-dir = ""
-pattern = "{{stem}}_mask.tif"
-
 [gui]
 caption_fields = ["gene", "replicate"]
 filter_fields = []

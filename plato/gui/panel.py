@@ -10,15 +10,19 @@ import random
 import shutil
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListView,
@@ -36,11 +40,66 @@ from ..cache import read_plane, scale_to_uint8
 from ..index.db import ImageRow
 from .delegate import ThumbnailDelegate
 from .model import ROW_ROLE, ThumbnailModel
+from .scalebar import draw_scale_bar
 from .session import Session
 from .viewer import ImageWindow
 
 MAX_DISTINCT_FOR_FILTER = 60
 EXPORT_FORMATS = ["TIFF (original)", "JPEG (converted)"]
+
+
+class ExportOptionsDialog(QDialog):
+    """Format choice plus JPEG-only options (scale bar, shared contrast)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Export format")
+
+        self.format_box = QComboBox()
+        self.format_box.addItems(EXPORT_FORMATS)
+        self.format_box.currentIndexChanged.connect(self._sync_jpeg_options)
+
+        self.scale_bar_box = QCheckBox("Bake in scale bar")
+        self.shared_contrast_box = QCheckBox("Use one shared brightness/contrast for all images")
+        self.shared_contrast_box.setToolTip(
+            "Off (default) = each image uses the fixed per-channel display limits "
+            "shown on screen. On = compute one min/max contrast stretch across all "
+            "selected images and apply it to every one of them."
+        )
+
+        form = QFormLayout()
+        form.addRow("Format", self.format_box)
+        form.addRow(self.scale_bar_box)
+        form.addRow(self.shared_contrast_box)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.setLayout(form)
+        self._sync_jpeg_options()
+
+    def _sync_jpeg_options(self) -> None:
+        is_jpeg = self.format_box.currentText() == EXPORT_FORMATS[1]
+        self.scale_bar_box.setEnabled(is_jpeg)
+        self.shared_contrast_box.setEnabled(is_jpeg)
+        if not is_jpeg:
+            self.scale_bar_box.setChecked(False)
+            self.shared_contrast_box.setChecked(False)
+
+    @property
+    def format(self) -> str:
+        return self.format_box.currentText()
+
+    @property
+    def bake_scale_bar(self) -> bool:
+        return self.scale_bar_box.isChecked()
+
+    @property
+    def shared_contrast(self) -> bool:
+        return self.shared_contrast_box.isChecked()
 
 
 class FilterBox(QGroupBox):
@@ -115,6 +174,14 @@ class BrowserPanel(QWidget):
         self.flagged_only = QCheckBox("Flagged only")
         self.flagged_only.toggled.connect(self.refresh)
 
+        self.autoscale_previews = QCheckBox("Autoscale previews")
+        self.autoscale_previews.setToolTip(
+            "Off (default) = fixed per-channel contrast shared across the whole "
+            "screen, so wells stay comparable. On = each thumbnail is contrast-"
+            "stretched to its own min/max."
+        )
+        self.autoscale_previews.toggled.connect(self.model.set_autoscale)
+
         self.filters: list[FilterBox] = []
         filter_columns = gui_cfg.filter_fields or session.filter_columns()
         filter_form = QVBoxLayout()
@@ -166,6 +233,7 @@ class BrowserPanel(QWidget):
         top.addWidget(QLabel("Search"))
         top.addWidget(self.search, 1)
         top.addWidget(self.flagged_only)
+        top.addWidget(self.autoscale_previews)
 
         splitter = QSplitter()
         splitter.addWidget(filter_scroll)
@@ -269,31 +337,63 @@ class BrowserPanel(QWidget):
         target = QFileDialog.getExistingDirectory(self, "Export selected images to…")
         if not target:
             return
-        fmt, ok = QInputDialog.getItem(
-            self, "Export format", "Format:", EXPORT_FORMATS, 0, False
-        )
-        if not ok:
+        dialog = ExportOptionsDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         destination = Path(target)
-        if fmt == EXPORT_FORMATS[0]:
+        if dialog.format == EXPORT_FORMATS[0]:
             self._export_tiff(rows, destination)
         else:
-            self._export_jpeg(rows, destination)
+            self._export_jpeg(
+                rows,
+                destination,
+                bake_scale_bar=dialog.bake_scale_bar,
+                shared_contrast=dialog.shared_contrast,
+            )
         self.status.emit(f"exported {len(rows)} images to {destination}")
 
     def _export_tiff(self, rows: list[ImageRow], destination: Path) -> None:
         for row in rows:
             shutil.copy2(row.path, destination / Path(row.path).name)
 
-    def _export_jpeg(self, rows: list[ImageRow], destination: Path) -> None:
+    def _shared_contrast_limits(self, rows: list[ImageRow]) -> dict[str, tuple[float, float]]:
+        """One (lo, hi) per channel, computed from percentiles across every
+        selected image in that channel — an auto contrast shared by the batch
+        rather than the fixed screen-wide levels."""
+        samples: dict[str, list[np.ndarray]] = {}
+        for row in rows:
+            plane = read_plane(Path(row.path))
+            flat = plane.ravel().astype(np.float32)
+            if flat.size > 50_000:
+                flat = flat[:: flat.size // 50_000]
+            samples.setdefault(row.channel or "_", []).append(flat)
+        limits: dict[str, tuple[float, float]] = {}
+        for channel, arrays in samples.items():
+            combined = np.concatenate(arrays)
+            lo, hi = np.percentile(combined, [1.0, 99.5])
+            if hi <= lo:
+                hi = lo + 1.0
+            limits[channel] = (float(lo), float(hi))
+        return limits
+
+    def _export_jpeg(
+        self,
+        rows: list[ImageRow],
+        destination: Path,
+        *,
+        bake_scale_bar: bool = False,
+        shared_contrast: bool = False,
+    ) -> None:
+        levels = self._shared_contrast_limits(rows) if shared_contrast else self.levels
         for row in rows:
             path = Path(row.path)
             plane = read_plane(path)
-            limits = self.levels.get(row.channel or "_", (float(plane.min()), float(plane.max())))
+            limits = levels.get(row.channel or "_", (float(plane.min()), float(plane.max())))
             eight_bit = scale_to_uint8(plane, limits)
-            Image.fromarray(eight_bit, mode="L").save(
-                destination / f"{path.stem}.jpg", format="JPEG", quality=92
-            )
+            image = Image.fromarray(eight_bit, mode="L")
+            if bake_scale_bar:
+                image = draw_scale_bar(image)
+            image.save(destination / f"{path.stem}.jpg", format="JPEG", quality=92)
 
     # -- metadata panel ---------------------------------------------------
 

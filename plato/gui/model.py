@@ -54,22 +54,35 @@ class _LoaderSignals(QObject):
 
 
 class _LoadTask(QRunnable):
-    def __init__(self, thumb_db: Path, image_id: str, key: str, signals: _LoaderSignals) -> None:
+    def __init__(
+        self,
+        thumb_db: Path,
+        image_id: str,
+        key: str,
+        autoscale: bool,
+        signals: _LoaderSignals,
+    ) -> None:
         super().__init__()
         self._thumb_db = thumb_db
         self._image_id = image_id
         self._key = key
+        self._autoscale = autoscale
         self._signals = signals
 
     def run(self) -> None:  # pragma: no cover - runs on worker thread
         try:
-            png = _cache_for_thread(self._thumb_db).get(self._image_id)
+            png = _cache_for_thread(self._thumb_db).get(self._image_id, autoscale=self._autoscale)
         except Exception:  # noqa: BLE001
             png = None
-        if png is None:
-            self._signals.missing.emit(self._key)
-        else:
-            self._signals.loaded.emit(self._key, png)
+        try:
+            if png is None:
+                self._signals.missing.emit(self._key)
+            else:
+                self._signals.loaded.emit(self._key, png)
+        except RuntimeError:
+            # The model (and its signal object) can be deleted while this
+            # thread-pool task was still in flight, e.g. on window close.
+            pass
 
 
 class ThumbnailModel(QAbstractListModel):
@@ -94,6 +107,7 @@ class ThumbnailModel(QAbstractListModel):
         self.caption_fields = caption_fields
         self.tile = tile
         self.blind = False
+        self.autoscale = False
 
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(4)
@@ -134,6 +148,17 @@ class ThumbnailModel(QAbstractListModel):
 
     def set_blind(self, blind: bool) -> None:
         self.blind = blind
+        if self._rows:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self._rows) - 1, 0))
+
+    def set_autoscale(self, autoscale: bool) -> None:
+        if autoscale == self.autoscale:
+            return
+        self.autoscale = autoscale
+        # Cached pixmaps were fetched under the old mode; drop them so every
+        # visible tile is re-requested from the cache under the new one.
+        self._pixmaps.clear()
+        self._pending.clear()
         if self._rows:
             self.dataChanged.emit(self.index(0, 0), self.index(len(self._rows) - 1, 0))
 
@@ -188,7 +213,7 @@ class ThumbnailModel(QAbstractListModel):
             return
         self._pending.add(key)
         thumb_db = self._session.plates[row.session_index].cfg.thumb_db_path
-        self._pool.start(_LoadTask(thumb_db, row.image_id, key, self._signals))
+        self._pool.start(_LoadTask(thumb_db, row.image_id, key, self.autoscale, self._signals))
 
     def _on_loaded(self, key: str, png: bytes) -> None:
         self._pending.discard(key)

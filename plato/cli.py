@@ -55,6 +55,7 @@ def cmd_thumbs(args: argparse.Namespace) -> int:
         sample_size=cfg.thumbnails.sample_size,
         workers=args.workers,
         force=args.force,
+        autoscale=not args.no_autoscale,
     )
     return 0
 
@@ -62,7 +63,13 @@ def cmd_thumbs(args: argparse.Namespace) -> int:
 def cmd_gui(args: argparse.Namespace) -> int:
     from .gui.app import run
 
-    cfg = _config(args) if args.config.exists() else None
+    cfg = None
+    if args.config.exists():
+        candidate = _config(args)
+        # report_path only exists after a successful 'plato index' run, so this
+        # tells apart a real index from a stray/partial .plato/index.sqlite.
+        if candidate.report_path.exists():
+            cfg = candidate
     return run(cfg)
 
 
@@ -97,6 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_config(p_thumbs)
     p_thumbs.add_argument("--workers", type=int, default=4)
     p_thumbs.add_argument("--force", action="store_true", help="re-render everything")
+    p_thumbs.add_argument(
+        "--no-autoscale",
+        action="store_true",
+        help="skip rendering the per-image autoscaled thumbnail variant",
+    )
     p_thumbs.set_defaults(func=cmd_thumbs)
 
     p_gui = sub.add_parser("gui", help="open the browser")

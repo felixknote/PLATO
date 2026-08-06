@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from .load_dialog import LoadPlateDialog
 from .panel import BrowserPanel
 from .session import Session
+from .settings import SettingsDialog
 
 ORGANISATION = "plato"
 
@@ -46,7 +47,7 @@ class MainWindow(QMainWindow):
         else:
             self._build_browser_ui()
 
-        self.showFullScreen()
+        self.showMaximized()
         self._restore_session()
 
     # -- empty state --------------------------------------------------------
@@ -132,6 +133,10 @@ class MainWindow(QMainWindow):
         self.blind_action.toggled.connect(self.set_blind)
         view_menu.addAction(self.blind_action)
 
+        settings_action = QAction("Settings…", self)
+        settings_action.triggered.connect(self.open_settings)
+        view_menu.addAction(settings_action)
+
         help_menu = self.menuBar().addMenu("&Help")
         keys = QAction("Keyboard shortcuts", self)
         keys.triggered.connect(self.show_shortcuts)
@@ -214,6 +219,9 @@ class MainWindow(QMainWindow):
             writer.writerows(rows)
         self._show_status(f"exported {len(rows)} annotations to {target}")
 
+    def open_settings(self) -> None:
+        SettingsDialog(self).exec()
+
     def show_shortcuts(self) -> None:
         QMessageBox.information(
             self,
@@ -229,7 +237,8 @@ class MainWindow(QMainWindow):
             "Image window\n"
             "  Left/Right  step through the current filter\n"
             "  A           toggle per-image autoscale\n"
-            "  M           toggle mask overlay\n"
+            "  S           toggle scale bar\n"
+            "  D           measure distance (click two points)\n"
             "  Esc         close",
         )
 

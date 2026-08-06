@@ -66,12 +66,6 @@ size = 384                # long edge, pixels
 percentiles = [1.0, 99.5]
 sample_size = 200         # images sampled per channel to estimate the limits
 
-[masks]
-# Optional segmentation mask overlay. Leave dir empty to disable.
-dir = ""
-# Format string; available fields: plate, well, row, col, field, channel, stem
-pattern = "{stem}_mask.tif"
-
 [gui]
 # Plate map columns shown under each thumbnail (kept short).
 caption_fields = ["Gene", "Antibiotic", "Concentration"]
@@ -122,16 +116,6 @@ class ThumbnailsConfig:
 
 
 @dataclass(slots=True)
-class MasksConfig:
-    dir: str = ""
-    pattern: str = "{stem}_mask.tif"
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.dir)
-
-
-@dataclass(slots=True)
 class GuiConfig:
     caption_fields: list[str] = field(default_factory=list)
     filter_fields: list[str] = field(default_factory=list)
@@ -144,7 +128,6 @@ class Config:
     images: ImagesConfig = field(default_factory=ImagesConfig)
     platemap: PlatemapConfig = field(default_factory=PlatemapConfig)
     thumbnails: ThumbnailsConfig = field(default_factory=ThumbnailsConfig)
-    masks: MasksConfig = field(default_factory=MasksConfig)
     gui: GuiConfig = field(default_factory=GuiConfig)
     source: Path | None = None
 
@@ -177,7 +160,6 @@ def load_config(path: str | Path) -> Config:
     img = raw.get("images", {})
     pmap = raw.get("platemap", {})
     thumb = raw.get("thumbnails", {})
-    masks = raw.get("masks", {})
     gui = raw.get("gui", {})
 
     cfg = Config(
@@ -210,10 +192,6 @@ def load_config(path: str | Path) -> Config:
             size=int(thumb.get("size", 384)),
             percentiles=tuple(thumb.get("percentiles", (1.0, 99.5))),  # type: ignore[arg-type]
             sample_size=int(thumb.get("sample_size", 200)),
-        ),
-        masks=MasksConfig(
-            dir=str(_resolve(base, masks["dir"])) if masks.get("dir") else "",
-            pattern=masks.get("pattern", "{stem}_mask.tif"),
         ),
         gui=GuiConfig(
             caption_fields=list(gui.get("caption_fields", [])),

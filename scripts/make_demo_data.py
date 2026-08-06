@@ -119,10 +119,6 @@ size = 256
 percentiles = [1.0, 99.5]
 sample_size = 100
 
-[masks]
-dir = ""
-pattern = "{{stem}}_mask.tif"
-
 [gui]
 caption_fields = ["gene", "antibiotic", "concentration_ug_ml"]
 filter_fields = []
