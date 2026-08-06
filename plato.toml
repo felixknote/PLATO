@@ -1,0 +1,52 @@
+# PLATO configuration — NIS-Elements screening plate with a scrambled grid map
+
+[project]
+name = "crispri_screen_P1"
+work_dir = "./.plato"
+plate_format = 96
+
+[images]
+dir = "./images"
+glob = "**/*.tif*"
+# WellA01_PointA01_0000_ChannelCam-DIA DIC Master Screening_Seq0000.tiff
+#     |        |     |          |                              |
+#   well     point  field     channel (may contain spaces)     seq
+# The channel group is lazy (.+?) so it stops at the first _Seq, which lets the
+# channel name contain both spaces and underscores.
+pattern = '^Well(?P<well>[A-P]\d{1,2})_Point(?P<point>[^_]+)_(?P<field>\d+)_Channel(?P<channel>.+?)_Seq(?P<seq>\d+)\.tiff?$'
+match_on = "name"
+
+# Microscope channel names are unusable as filter labels. The raw name stays in
+# the file; only the indexed label is shortened.
+[images.channel_aliases]
+"Cam-DIA DIC Master Screening" = "DIC"
+"Cam-DIA_DIC_Master_Screening" = "DIC"
+
+[platemap]
+path = "./scrambled_plate_map_20260717_101617_P1.csv"
+layout = "matrix"          # the plate drawn as an 8x12 grid
+header_row = false         # no 1..12 column labels
+index_col = false          # no A..H row labels — position IS the well
+value_column = "Condition"
+# Each cell is <condition>_<replicate>, e.g. ftsZ_2 or "ACE-1 NC_6".
+# Splitting is what makes "show me all ftsZ" work instead of ftsZ_1/2/3 being
+# three unrelated conditions. The gene group is lazy-anchored to the LAST
+# underscore so control names containing spaces and hyphens survive intact.
+split_pattern = '^(?P<gene>.+)_(?P<replicate>\d+)$'
+# Plate name comes from the map file name (..._P1.csv), overriding default_plate.
+plate_pattern = '_(?P<plate>P\d+)\.'
+default_plate = "P1"
+
+[thumbnails]
+size = 256
+percentiles = [1.0, 99.5]
+sample_size = 100
+
+[masks]
+dir = ""
+pattern = "{stem}_mask.tif"
+
+[gui]
+caption_fields = ["gene", "replicate"]
+filter_fields = []
+thumbnail_size = 200
