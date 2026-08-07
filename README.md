@@ -143,7 +143,7 @@ to gate a pipeline on a clean join.
 | 1–5 / 0 | rate / clear rating |
 | R | random image |
 | Ctrl+D | compare two conditions side by side |
-| Ctrl+Shift+D | compare along a variable — one panel per value |
+| Ctrl+Shift+D | compare along a variable — one image per value, stepped together |
 | Ctrl+Shift+W | close the comparison |
 | Ctrl+B | blinded review |
 | ←/→ (viewer) | step through the current filter |

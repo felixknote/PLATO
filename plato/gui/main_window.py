@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from .compare_dialog import CompareSetupDialog
+from .compare_view import ComparisonColumn, ComparisonView
 from .load_dialog import LoadPlateDialog
 from .panel import BrowserPanel
 from .session import Session
@@ -38,8 +39,8 @@ class MainWindow(QMainWindow):
         self.splitter: QSplitter | None = None
         self.primary: BrowserPanel | None = None
         self.secondary: BrowserPanel | None = None
-        # Panels of an N-way comparison; empty when not comparing.
-        self.comparison_panels: list[BrowserPanel] = []
+        # The N-way comparison view; None when not comparing.
+        self.comparison: ComparisonView | None = None
 
         self.setStatusBar(QStatusBar())
         self._build_menu()
@@ -225,38 +226,57 @@ class MainWindow(QMainWindow):
         if self.compare_action.isChecked():
             self.compare_action.setChecked(False)
 
+        limits = self.session.display_limits()
+        columns = []
         for value in values:
-            panel = BrowserPanel(self.session, self)
-            panel.status.connect(self._show_status)
-            panel.set_blind(self.blind_action.isChecked())
-            panel.set_locked_filters({**base, column: [value]})
-            panel.set_title(f"{self.session.label(column)}: {value}")
-            panel.set_compact(True)
-            self.splitter.addWidget(panel)
-            self.comparison_panels.append(panel)
+            rows = self.session.query({**base, column: [value]})
+            col = ComparisonColumn(f"{self.session.label(column)}: {value}", rows)
+            # Same fixed per-channel limits the grid uses, so a difference
+            # between columns is a difference in the sample, not in scaling.
+            channel = rows[0].channel if rows else None
+            col.set_levels(limits.get(channel or "_"))
+            columns.append(col)
+
+        self.comparison = ComparisonView(self)
+        self.comparison.status.connect(self._show_status)
+        self.comparison.export_button.clicked.connect(self._export_comparison)
+        self.comparison.set_columns(columns)
+        self.splitter.addWidget(self.comparison)
 
         if self.primary is not None:
             self.primary.setVisible(False)
-        self.splitter.setSizes([1] * self.splitter.count())
         base_text = ", ".join(f"{k}={v[0]}" for k, v in base.items()) or "all data"
         self._show_status(f"comparing {column} across {len(values)} values — {base_text}")
 
+    def _export_comparison(self) -> None:
+        """Export exactly the images currently on screen, one per slice."""
+        if self.comparison is None:
+            return
+        rows = self.comparison.visible_rows()
+        if not rows:
+            QMessageBox.information(self, "Export", "Nothing on screen to export.")
+            return
+        # Reuses the panel's export path so format choice, scale-bar baking and
+        # shared contrast behave identically to exporting from the grid.
+        exporter = self.primary or BrowserPanel(self.session, self)
+        exporter.export_rows(rows)
+
     def _clear_comparison(self) -> None:
-        for panel in self.comparison_panels:
-            panel.setParent(None)
-            panel.deleteLater()
-        self.comparison_panels.clear()
+        if self.comparison is not None:
+            self.comparison.setParent(None)
+            self.comparison.deleteLater()
+            self.comparison = None
         if self.primary is not None:
             self.primary.setVisible(True)
 
     def exit_comparison(self) -> None:
-        if not self.comparison_panels:
+        if self.comparison is None:
             return
         self._clear_comparison()
         self._show_status("comparison closed")
 
     def set_blind(self, enabled: bool) -> None:
-        for panel in filter(None, (self.primary, self.secondary, *self.comparison_panels)):
+        for panel in filter(None, (self.primary, self.secondary)):
             panel.set_blind(enabled)
         self._show_status(
             "Blinded review on — metadata hidden, order randomised"

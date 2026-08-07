@@ -392,6 +392,13 @@ class BrowserPanel(QWidget):
         if not rows:
             QMessageBox.information(self, "Export", "Select some images first.")
             return
+        self.export_rows(rows)
+
+    def export_rows(self, rows: list[ImageRow]) -> None:
+        """Export an explicit set of rows. Shared by the grid's "Export
+        selected" and the comparison view's "Export what's on screen"."""
+        if not rows:
+            return
         target = QFileDialog.getExistingDirectory(self, "Export selected images to…")
         if not target:
             return
