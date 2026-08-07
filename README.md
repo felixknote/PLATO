@@ -151,6 +151,40 @@ to gate a pipeline on a clean join.
 | A (viewer) | per-image autoscale |
 | S (viewer) | toggle scale bar |
 
+## Comparing along a variable
+
+`Ctrl+Shift+D` sets up the comparison a dose series or a timepoint course is
+actually for: hold one condition constant, pick a variable to compare along,
+and tick which of its values to show.
+
+```
+Hold constant   Antibiotic = Ciprofloxacin
+Compare along   Concentration
+Show            1/8x  1/4x  1/2x  1x
+```
+
+You get one column per value, each showing a single image at size rather than
+a grid of thumbnails, so the only thing differing between columns is the
+variable. Every column shares the same fixed per-channel contrast, which means
+a brightness difference between columns is a difference in the sample and not
+in scaling — tick **Autoscale each image** when you need faint detail out of
+one slice and can accept that the columns stop being directly comparable.
+
+`Previous`/`Next` step every column together, keeping position N of each slice
+on screen at once. The `←`/`→` arrows step only the selected column — click a
+column to select it, it takes a highlight frame — which is what you want when
+the Nth field of one slice is out of focus and you need a comparable one.
+Columns can then fall out of step, so the position label says so and
+**Realign** puts them all back on the selected column's position.
+
+**Export what's on screen** writes exactly the visible images, one per column
+— the comparison you are looking at, not the hundred images behind it. Format
+choice, scale-bar baking and shared contrast behave as they do in the grid.
+
+If nothing is held constant, each column mixes every condition at that value,
+which looks like a comparison and is not one; the dialog says so rather than
+letting it through quietly.
+
 ## Two things that are deliberate, not oversights
 
 **Contrast is fixed per channel across the whole screen.** Limits are estimated
@@ -215,9 +249,23 @@ If that becomes annoying, move `IndexDB.query` onto a worker thread; the model
 already handles asynchronous updates.
 
 Thumbnail rendering is the slow part and runs once. Measured on the real
-2720×2720 uint16 uncompressed DIC TIFFs: ~52 ms per image at 4 workers
-(192 images in 10 s), so roughly 15 minutes for 10k images at 8 workers. It is incremental
-after that (keyed on mtime and size).
+2720×2720 uint16 uncompressed DIC TIFFs: a 2016-image plate builds in ~11 s
+on a 36-core box (default worker count), so roughly a minute for 10k images.
+It is incremental after that (keyed on mtime and size), so re-running only
+picks up what changed.
+
+Two things make that fast, both in `cache/thumbnails.py`. Planes are
+memory-mapped rather than read through `tifffile.imread` — these files are
+uncompressed with one row per strip, so the OS can map the bytes instead of
+reassembling 2720 strips in Python, and the result is bit-identical.
+Thumbnails then read every second pixel (`THUMBNAIL_READ_STRIDE`), which is
+still ~5× more data than a 256px tile needs; the final PNGs differ from a
+full read by at most 12/255. Both are thumbnail-only — the viewer and every
+export path read full resolution.
+
+The side-by-side comparison decodes at ~1200px rather than full resolution
+and prefetches the neighbouring image in each column, so stepping is a cache
+lookup (~0 ms) rather than a ~33 ms decode per column.
 
 ## Known limits
 
@@ -229,6 +277,14 @@ after that (keyed on mtime and size).
   would need OME-Zarr and a different viewer.
 - Ratings are per image, not per well. If you want well-level scoring, add a
   second annotations table keyed on `(plate, well)`.
+- In a multi-plate session the display limits of the first-loaded plate are
+  used for all of them (`Session.display_limits` merges with `setdefault`).
+  Plates imaged on different days can therefore render inconsistently, which
+  matters most when comparing across timepoints — pooling the samples across
+  loaded plates would fix it.
+- Blinded review hides the metadata and randomises order, but does not clear
+  the filters. Filtering to one condition and then entering blind mode leaves
+  you scoring a set you already know the label of.
 
 ## Tests
 
