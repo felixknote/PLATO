@@ -144,6 +144,7 @@ to gate a pipeline on a clean join.
 | R | random image |
 | Ctrl+D | compare two conditions side by side |
 | Ctrl+Shift+D | compare along a variable — one image per value, stepped together |
+| ←/→ (comparison) | step only the selected column; click a column to select it |
 | Ctrl+Shift+W | close the comparison |
 | Ctrl+B | blinded review |
 | ←/→ (viewer) | step through the current filter |
