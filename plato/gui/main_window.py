@@ -213,8 +213,18 @@ class MainWindow(QMainWindow):
         )
         if not target:
             return
+        # Field names are the union across every row, not row 0's keys: plates
+        # in one session can carry different plate-map columns (one screen's
+        # "antibiotic" is another's "compound"), and DictWriter raises on any
+        # key it was not told about. Taking the union keeps a mixed session
+        # exportable, with blanks where a plate has no such column.
+        fieldnames: list[str] = []
+        for row in rows:
+            for key in row:
+                if key not in fieldnames:
+                    fieldnames.append(key)
         with Path(target).open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, restval="")
             writer.writeheader()
             writer.writerows(rows)
         self._show_status(f"exported {len(rows)} annotations to {target}")

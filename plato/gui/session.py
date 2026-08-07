@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from ..config import Config
 from ..index.db import ImageRow, IndexDB
+from ..wells import parse_well
 
 
 @dataclass(slots=True)
@@ -125,10 +126,30 @@ class Session:
         )
 
     def export_annotations(self) -> list[dict]:
+        """Marked rows from every loaded plate, tagged with their source.
+
+        ``image_id`` is only unique *within* a plate (see the module docstring),
+        so a bare image_id is ambiguous the moment two plates are loaded -- two
+        plates readily share a relative path like ``WellA01_..._Seq0000.tiff``.
+        Every row therefore carries ``plate_source`` (the image root it came
+        from) and ``uid`` (session index + image_id), so a batch export can be
+        traced back to actual files without guessing which plate owns a row.
+        """
         rows: list[dict] = []
-        for plate in self.plates:
-            rows.extend(plate.db.export_annotations())
+        for index, plate in enumerate(self.plates):
+            root = str(plate.cfg.images.dir)
+            for row in plate.db.export_annotations():
+                rows.append({"uid": f"{index}/{row['image_id']}", "plate_source": root, **row})
         return rows
+
+
+def _well_key(well: str) -> tuple[int, int]:
+    """(row, col) for sorting. Unparseable wells sort last rather than raise."""
+    try:
+        parsed = parse_well(well)
+    except Exception:  # noqa: BLE001 - a malformed well must not break sorting
+        return (10**6, 10**6)
+    return (parsed.row, parsed.col)
 
 
 def _resort(rows: list[ImageRow], order: str) -> list[ImageRow]:
@@ -141,8 +162,11 @@ def _resort(rows: list[ImageRow], order: str) -> list[ImageRow]:
     keys = [part.strip() for part in order.split(",")]
     key_getters = {
         "plate": lambda r: r.plate,
-        "well_row": lambda r: r.well,
-        "well_col": lambda r: r.well,
+        # Sort on the parsed (row, col), not the label: "A10" sorts before "A2"
+        # as a string, which scrambles plate order and makes the two panels of
+        # compare mode non-comparable position for position.
+        "well_row": lambda r: _well_key(r.well)[0],
+        "well_col": lambda r: _well_key(r.well)[1],
         "field": lambda r: r.field or "",
         "channel": lambda r: r.channel or "",
         "well": lambda r: r.well,
