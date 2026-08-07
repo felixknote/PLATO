@@ -231,6 +231,7 @@ class MainWindow(QMainWindow):
             panel.set_blind(self.blind_action.isChecked())
             panel.set_locked_filters({**base, column: [value]})
             panel.set_title(f"{self.session.label(column)}: {value}")
+            panel.set_compact(True)
             self.splitter.addWidget(panel)
             self.comparison_panels.append(panel)
 

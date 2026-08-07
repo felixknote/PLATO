@@ -54,6 +54,15 @@ class CompareSetupDialog(QDialog):
             self.base_column.addItem(session.label(column), column)
             self.variable.addItem(session.label(column), column)
 
+        # Default to holding the first real column constant rather than
+        # "(none)": comparing a concentration series across *every* antibiotic
+        # at once puts four unrelated drugs side by side, which looks like a
+        # comparison and is not one. "(none)" stays available deliberately.
+        if self.base_column.count() > 1:
+            self.base_column.setCurrentIndex(1)
+        if self.variable.count() > 1:
+            self.variable.setCurrentIndex(1)
+
         self.base_column.currentIndexChanged.connect(self._reload_base_values)
         self.variable.currentIndexChanged.connect(self._reload_variable_values)
 
@@ -112,6 +121,7 @@ class CompareSetupDialog(QDialog):
     def _reload_base_values(self) -> None:
         column = self.base_column.currentData()
         self.base_value.clear()
+        self._update_hint()
         if not column:
             self.base_value.setEnabled(False)
             return
@@ -141,13 +151,21 @@ class CompareSetupDialog(QDialog):
 
     def _update_hint(self) -> None:
         n = len(self.selected_values())
-        if n > 6:
+        if not n:
+            self.hint.setText("Select at least one value.")
+        elif not self.base_column.currentData():
+            self.hint.setText(
+                f"{n} panels, nothing held constant — each panel will mix every "
+                "condition at that value. Pick something to hold constant unless "
+                "you mean to compare across the whole screen."
+            )
+        elif n > 6:
             self.hint.setText(
                 f"{n} panels — they will be narrow. Consider fewer values for a "
                 "readable side-by-side."
             )
         else:
-            self.hint.setText(f"{n} panel(s) will open." if n else "Select at least one value.")
+            self.hint.setText(f"{n} panel(s) will open.")
 
     # -- result -------------------------------------------------------------
 

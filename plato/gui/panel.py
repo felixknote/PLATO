@@ -243,6 +243,9 @@ class BrowserPanel(QWidget):
         top.addWidget(self.search, 1)
         top.addWidget(self.flagged_only)
         top.addWidget(self.autoscale_previews)
+        # Wrapped in a widget so compact mode can hide the whole row at once.
+        self.search_row = QWidget()
+        self.search_row.setLayout(top)
 
         splitter = QSplitter()
         splitter.addWidget(filter_scroll)
@@ -251,11 +254,15 @@ class BrowserPanel(QWidget):
         splitter.setStretchFactor(1, 1)
         self.filter_scroll = filter_scroll
 
+        self.header = QHBoxLayout()
+        self.header.addWidget(self.title_label, 1)
+
         layout = QVBoxLayout()
-        layout.addWidget(self.title_label)
-        layout.addLayout(top)
+        layout.addLayout(self.header)
+        layout.addWidget(self.search_row)
         layout.addWidget(splitter, 1)
         self.setLayout(layout)
+        self.compact = False
 
         self.refresh()
 
@@ -280,6 +287,30 @@ class BrowserPanel(QWidget):
             if box.column in self.locked_filters:
                 box.setVisible(False)
         self.refresh()
+
+    def set_compact(self, compact: bool) -> None:
+        """Strip the browsing chrome down to the images.
+
+        A comparison panel is one of several on screen and exists to show a
+        slice, not to browse the screen: its filters are locked, so the filter
+        sidebar cannot change anything, and the search box and metadata panel
+        would each cost more width than the thumbnails they sit beside. At four
+        panels the chrome consumed roughly nine tenths of every panel and the
+        images rendered in a ~30px sliver. Hiding it gives the width back to
+        the only thing being compared.
+
+        The count stays -- panels of different sizes is exactly the kind of
+        asymmetry you want visible when comparing slices.
+        """
+        self.compact = compact
+        self.filter_scroll.setVisible(not compact)
+        self.side_container.setVisible(not compact)
+        self.search_row.setVisible(not compact)
+        self.count_label.setVisible(compact)
+        if compact:
+            # Reparented under the title so the count stays visible once the
+            # side panel that normally holds it is gone.
+            self.header.addWidget(self.count_label)
 
     def refresh(self) -> None:
         order = "RANDOM()" if self.blind else "plate, well_row, well_col, field, channel"
