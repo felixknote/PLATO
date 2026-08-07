@@ -154,3 +154,16 @@ def test_display_limits_are_shared_across_the_screen(demo: Path) -> None:
         assert all(hi > lo for lo, hi in limits.values())
     finally:
         db.close()
+
+
+def test_timepoint_is_derived_from_plate_name() -> None:
+    from plato.gui.session import timepoint_of
+
+    assert timepoint_of("P13_T1") == "T1"
+    assert timepoint_of("P5_T10") == "T10"
+    assert timepoint_of("plate_t7") == "T7"  # case-insensitive
+    # No suffix, or a trailing _T that is not a timepoint, yields nothing --
+    # filter_columns() then never offers the column.
+    assert timepoint_of("P1") == ""
+    assert timepoint_of("Screen_TX") == ""
+    assert timepoint_of("") == ""

@@ -7,7 +7,14 @@ viewer and to bake it into exported images.
 from __future__ import annotations
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QWidget
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFormLayout,
+    QWidget,
+)
 
 ORGANISATION = "plato"
 APPLICATION = "plato"
@@ -37,6 +44,16 @@ def set_scale_bar_fraction(value: float) -> None:
     settings.setValue("scale_bar_fraction", float(value))
 
 
+def get_show_timepoint() -> bool:
+    settings = QSettings(ORGANISATION, APPLICATION)
+    return settings.value("show_timepoint", True, type=bool)
+
+
+def set_show_timepoint(value: bool) -> None:
+    settings = QSettings(ORGANISATION, APPLICATION)
+    settings.setValue("show_timepoint", bool(value))
+
+
 class SettingsDialog(QDialog):
     """Edits app-wide preferences: pixel size and scale-bar length."""
 
@@ -56,9 +73,19 @@ class SettingsDialog(QDialog):
         self.scale_bar_percent.setSuffix(" % of image width")
         self.scale_bar_percent.setValue(get_scale_bar_fraction() * 100)
 
+        self.show_timepoint = QCheckBox("Offer timepoint as a filter")
+        self.show_timepoint.setToolTip(
+            "Plate folders named like P13_T1 carry a timepoint suffix. When on, "
+            "the suffix is offered as its own filter so you can slice across "
+            "plates (all T1 wells, regardless of plate). Off hides it — useful "
+            "if your folder names end in something that is not a timepoint."
+        )
+        self.show_timepoint.setChecked(get_show_timepoint())
+
         form = QFormLayout()
         form.addRow("Pixel size", self.nm_per_pixel)
         form.addRow("Scale bar length", self.scale_bar_percent)
+        form.addRow("Timepoint", self.show_timepoint)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -71,4 +98,5 @@ class SettingsDialog(QDialog):
     def _accept(self) -> None:
         set_nm_per_pixel(self.nm_per_pixel.value())
         set_scale_bar_fraction(self.scale_bar_percent.value() / 100)
+        set_show_timepoint(self.show_timepoint.isChecked())
         self.accept()

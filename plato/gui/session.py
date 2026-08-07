@@ -18,9 +18,25 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import re
+
 from ..config import Config
 from ..index.db import ImageRow, IndexDB
 from ..wells import parse_well
+from .settings import get_show_timepoint
+
+# Filter column name for the plate-name timepoint suffix.
+TIMEPOINT = "timepoint"
+
+# Trailing _T<n> on a plate/folder name: "P13_T1" -> "T1". Anchored to the end
+# so it cannot match a _T in the middle of an unrelated name.
+_TIMEPOINT_RE = re.compile(r"_(?P<timepoint>T\d+)$", re.IGNORECASE)
+
+
+def timepoint_of(plate_name: str) -> str:
+    """"P13_T1" -> "T1"; "" when the name carries no timepoint suffix."""
+    match = _TIMEPOINT_RE.search(plate_name or "")
+    return match.group("timepoint").upper() if match else ""
 
 
 @dataclass(slots=True)
@@ -68,9 +84,33 @@ class Session:
         for plate in self.plates:
             for column in plate.db.filter_columns():
                 seen.setdefault(column, None)
+        if self.timepoints():
+            seen.setdefault(TIMEPOINT, None)
         return list(seen)
 
+    def timepoints(self) -> list[str]:
+        """Distinct timepoints across loaded plates, empty if none are named.
+
+        Derived from the plate name rather than stored: a plate folder is one
+        timepoint (P13_T1), so the suffix is a property of the plate, not of
+        any individual image, and needs no schema change to expose. Returns
+        empty when the setting is off or no plate name carries a suffix, and
+        filter_columns() then never offers the column -- so a screen whose
+        folders happen to end in _T-something they do not mean does not
+        acquire a meaningless filter.
+        """
+        if not get_show_timepoint():
+            return []
+        found: dict[str, None] = {}
+        for plate in self.plates:
+            value = timepoint_of(plate.cfg.project.name)
+            if value:
+                found.setdefault(value, None)
+        return list(found)
+
     def distinct(self, column: str) -> list[str]:
+        if column == TIMEPOINT:
+            return sorted(self.timepoints())
         values: set[str] = set()
         for plate in self.plates:
             values.update(plate.db.distinct(column))
@@ -97,8 +137,18 @@ class Session:
         order: str = "plate, well_row, well_col, field, channel",
         limit: int | None = None,
     ) -> list[ImageRow]:
+        # Timepoint is a property of the plate, not a column in any plate's
+        # index, so it selects whole plates here and must not be forwarded to
+        # IndexDB.query -- which would raise on an unknown column.
+        wanted: list[str] = []
+        if filters and TIMEPOINT in filters:
+            filters = dict(filters)
+            wanted = [str(v) for v in filters.pop(TIMEPOINT)]
+
         rows: list[ImageRow] = []
         for index, plate in enumerate(self.plates):
+            if wanted and timepoint_of(plate.cfg.project.name) not in wanted:
+                continue
             plate_rows = plate.db.query(
                 filters, search, flagged_only=flagged_only, order=order, limit=limit
             )
