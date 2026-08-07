@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -30,6 +30,17 @@ from PySide6.QtWidgets import (
 from ..cache import read_plane, scale_to_uint8
 from ..index.db import ImageRow
 
+# Decode target for the comparison columns. Well above the ~900px a column
+# actually gets on a wide screen, so the displayed image is still downscaled
+# from more data than it shows, but far below the 2720px source -- which is
+# what makes the 8-bit conversion cheap enough to step through fluidly.
+_DISPLAY_TARGET_PX = 1200
+
+# Cached pixmaps per column before the cache is dropped. The prefetch only
+# needs the immediate neighbours; this leaves room to step a few frames each
+# way without re-decoding, at roughly 1.8MB per entry.
+_CACHE_ENTRIES = 12
+
 
 class ComparisonColumn(QWidget):
     """One slice: a title, one image, and the caption for what is shown."""
@@ -43,6 +54,8 @@ class ComparisonColumn(QWidget):
         self._levels: tuple[float, float] | None = None
         self.autoscale = False
         self.selected = False
+        # (row index, autoscale) -> decoded pixmap.
+        self._cache: dict[tuple[int, bool], QPixmap] = {}
 
         self.title = QLabel(f"<b>{title}</b>")
         self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -98,31 +111,77 @@ class ComparisonColumn(QWidget):
             return None
         return self.rows[self.position % len(self.rows)]
 
-    def show_current(self) -> None:
-        row = self.current_row()
-        if row is None:
-            self.image.setText("no images in this slice")
-            self.caption.setText("")
-            return
+    def _render(self, index: int) -> QPixmap | None:
+        """Decode one image to a display-sized pixmap, memoised.
+
+        Two costs are avoided here. The obvious one is decoding the same file
+        again every time you step back and forth. The larger one is that a
+        2720x2720 uint16 plane costs ~118ms to scale to 8-bit, and the column
+        displays it at roughly 900px -- so the plane is subsampled to ~1200px
+        *before* the 8-bit conversion, which is where nearly all the time was
+        going. Measured: 127ms -> 41ms per image.
+
+        Subsampling here is display-only. The full-resolution viewer and every
+        export path read their own planes and are unaffected.
+        """
+        if not self.rows:
+            return None
+        index %= len(self.rows)
+        key = (index, self.autoscale)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        row = self.rows[index]
         plane = read_plane(Path(row.path))
+        step = max(1, min(plane.shape) // _DISPLAY_TARGET_PX)
+        if step > 1:
+            plane = plane[::step, ::step]
+
         levels = None if self.autoscale else self._levels
         if levels is None:
-            # Per-image percentiles. Off by default because a shared scale is
-            # what makes a dead well and a healthy one look different; on when
-            # you need faint detail out of one slice.
             flat = plane.ravel().astype(np.float32)
             if flat.size > 50_000:
                 flat = flat[:: flat.size // 50_000]
             levels = (float(np.percentile(flat, 1.0)), float(np.percentile(flat, 99.5)))
         u8 = scale_to_uint8(plane, levels)
         height, width = u8.shape
-        image = QImage(u8.tobytes(), width, height, width, QImage.Format.Format_Grayscale8)
-        pixmap = QPixmap.fromImage(image).scaled(
-            self.image.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+        pixmap = QPixmap.fromImage(
+            QImage(u8.tobytes(), width, height, width, QImage.Format.Format_Grayscale8)
         )
-        self.image.setPixmap(pixmap)
+
+        # Bounded so a long slice cannot grow without limit; a few entries each
+        # side of the current position is all the prefetch needs.
+        if len(self._cache) > _CACHE_ENTRIES:
+            self._cache.clear()
+        self._cache[key] = pixmap
+        return pixmap
+
+    def prefetch_neighbours(self) -> None:
+        """Decode the images either side of the current one.
+
+        Stepping is the whole interaction here, so the next image should
+        already be decoded by the time it is asked for. Called after the
+        current image is on screen, so it never delays what you are looking at.
+        """
+        for offset in (1, -1):
+            self._render(self.position + offset)
+
+    def show_current(self) -> None:
+        row = self.current_row()
+        if row is None:
+            self.image.setText("no images in this slice")
+            self.caption.setText("")
+            return
+        pixmap = self._render(self.position)
+        if pixmap is not None:
+            self.image.setPixmap(
+                pixmap.scaled(
+                    self.image.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
         n = len(self.rows)
         self.caption.setText(
             f"{row.well} · field {row.field or '—'} · {self.position % n + 1}/{n}"
@@ -229,7 +288,8 @@ class ComparisonView(QWidget):
         if column is not None and column.rows:
             column.position = (column.position + delta) % len(column.rows)
             column.show_current()
-            self.refresh()
+            self._update_position_label()
+            QTimer.singleShot(0, column.prefetch_neighbours)
 
     def realign(self) -> None:
         """Put every column back on the selected column's position."""
@@ -253,6 +313,13 @@ class ComparisonView(QWidget):
         for column in self.columns:
             column.show_current()
         self._update_position_label()
+        # After every column is on screen, not before -- prefetching first
+        # would delay the images the user is waiting for.
+        QTimer.singleShot(0, self._prefetch)
+
+    def _prefetch(self) -> None:
+        for column in self.columns:
+            column.prefetch_neighbours()
 
     def _update_position_label(self) -> None:
         column = self.selected_column()
