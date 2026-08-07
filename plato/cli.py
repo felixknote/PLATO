@@ -102,7 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_thumbs = sub.add_parser("thumbs", help="build or refresh the thumbnail cache")
     add_config(p_thumbs)
-    p_thumbs.add_argument("--workers", type=int, default=4)
+    p_thumbs.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="render threads (default: scales with CPU count)",
+    )
     p_thumbs.add_argument("--force", action="store_true", help="re-render everything")
     p_thumbs.add_argument(
         "--no-autoscale",
