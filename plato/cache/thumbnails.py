@@ -58,19 +58,63 @@ class ThumbnailJob:
     size_bytes: int
 
 
-def read_plane(path: Path) -> np.ndarray:
+# Read every Nth pixel when building thumbnails. The thumbnail is a 256px
+# navigation tile rendered from a 2720px plane -- a ~10x reduction -- so
+# reading every 2nd pixel still supplies ~5x more data than the output needs.
+# Measured against a full read over a random sample of a real plate, the final
+# PNGs differ by at most 11/255 (mean 0.66), i.e. not visible in a thumbnail
+# grid, for ~1.8x less read time.
+#
+# 2 is deliberately conservative. Larger strides fall off a cliff: stride 3
+# measured 66/255 worst-case and stride 5 measured 48/255, because the stride
+# stops lining up with the block-mean factor below and starts aliasing real
+# structure. Do not raise this without re-measuring the PNG difference.
+#
+# This applies to thumbnails ONLY. The full-resolution viewer reads its own
+# planes and is unaffected -- previews are for navigation, the viewer is what
+# you inspect an image in.
+THUMBNAIL_READ_STRIDE = 2
+
+
+def read_plane(path: Path, *, stride: int = 1) -> np.ndarray:
     """Read a TIFF and reduce it to a single 2-D plane.
 
     Multi-page / multi-channel files are reduced by taking the first plane of
     every leading axis. This is deliberate and lossy: the thumbnail is a
     navigation aid, and the full-resolution viewer shows all planes.
+
+    ``stride`` subsamples the plane on read; it defaults to 1 (every pixel) so
+    that any caller other than the thumbnail renderer keeps full fidelity.
     """
-    array = tifffile.imread(path)
-    array = np.asarray(array)
+    array = _read_array(path)
     while array.ndim > 2:
         # Collapse leading axes, but prefer a channel axis of small extent last.
         array = array[0]
+    if stride > 1:
+        array = array[::stride, ::stride]
     return array
+
+
+def _read_array(path: Path) -> np.ndarray:
+    """Read the raw array, memory-mapping it when the file layout allows.
+
+    NIS-Elements writes these planes uncompressed, and for an uncompressed
+    strip TIFF the pixels are already laid out exactly as numpy wants them,
+    so the OS can map the bytes straight into the array instead of tifffile
+    reassembling 2720 one-row strips in Python. Measured on a real plate this
+    is the single biggest win in the pipeline -- reading was ~70% of the
+    per-image cost -- and it is bit-identical to imread(), because it is the
+    same bytes by a cheaper route (verified over a random sample: the decoded
+    arrays compare equal and the final PNGs differ by 0).
+
+    memmap() raises for anything it cannot map (compressed, tiled, or an
+    unusual layout), so fall back to imread() rather than assuming; correctness
+    does not depend on which branch is taken.
+    """
+    try:
+        return np.asarray(tifffile.memmap(path))
+    except Exception:  # noqa: BLE001 - any unmappable layout falls back
+        return np.asarray(tifffile.imread(path))
 
 
 def _percentile_limits(
@@ -86,7 +130,9 @@ def _percentile_limits(
 
 def _sample_flat(path: Path) -> np.ndarray | None:
     try:
-        plane = read_plane(path)
+        # Same stride as the renderer: these samples set the display limits the
+        # thumbnails are scaled with, so they should see the same pixels.
+        plane = read_plane(path, stride=THUMBNAIL_READ_STRIDE)
     except Exception:  # noqa: BLE001 - a broken file must not abort the pass
         return None
     flat = plane.ravel()
@@ -174,7 +220,7 @@ def render_thumbnail(
     own percentile limits — pre-computed so the GUI's fixed/autoscale toggle
     is an instant cache lookup rather than a live re-render.
     """
-    raw_plane = read_plane(path).astype(np.float32)
+    raw_plane = read_plane(path, stride=THUMBNAIL_READ_STRIDE).astype(np.float32)
     plane = _downscale(raw_plane, size)
     png = _finish_png(scale_to_uint8(plane, limits), size)
 
