@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .compare_dialog import CompareSetupDialog
 from .load_dialog import LoadPlateDialog
 from .panel import BrowserPanel
 from .session import Session
@@ -37,6 +38,8 @@ class MainWindow(QMainWindow):
         self.splitter: QSplitter | None = None
         self.primary: BrowserPanel | None = None
         self.secondary: BrowserPanel | None = None
+        # Panels of an N-way comparison; empty when not comparing.
+        self.comparison_panels: list[BrowserPanel] = []
 
         self.setStatusBar(QStatusBar())
         self._build_menu()
@@ -125,6 +128,16 @@ class MainWindow(QMainWindow):
         self.compare_action.toggled.connect(self.set_compare)
         view_menu.addAction(self.compare_action)
 
+        compare_by = QAction("Compare along a variable…", self)
+        compare_by.setShortcut("Ctrl+Shift+D")
+        compare_by.triggered.connect(self.compare_by_variable)
+        view_menu.addAction(compare_by)
+
+        close_compare = QAction("Close comparison", self)
+        close_compare.setShortcut("Ctrl+Shift+W")
+        close_compare.triggered.connect(self.exit_comparison)
+        view_menu.addAction(close_compare)
+
         self.blind_action = QAction("Blinded review", self, checkable=True)
         self.blind_action.setShortcut("Ctrl+B")
         self.blind_action.setStatusTip(
@@ -192,8 +205,57 @@ class MainWindow(QMainWindow):
             self.secondary.deleteLater()
             self.secondary = None
 
+    def compare_by_variable(self) -> None:
+        """One panel per value of a chosen variable, all sharing a base condition."""
+        if self.session.is_empty or self.splitter is None:
+            return
+        dialog = CompareSetupDialog(self.session, self)
+        if dialog.exec() != CompareSetupDialog.DialogCode.Accepted:
+            return
+
+        column = dialog.variable_column()
+        values = dialog.selected_values()
+        base = dialog.base_filter()
+        if not column or not values:
+            return
+
+        self._clear_comparison()
+        # The two-panel compare and the N-panel compare are the same screen
+        # real estate; leaving both on would stack unrelated panels.
+        if self.compare_action.isChecked():
+            self.compare_action.setChecked(False)
+
+        for value in values:
+            panel = BrowserPanel(self.session, self)
+            panel.status.connect(self._show_status)
+            panel.set_blind(self.blind_action.isChecked())
+            panel.set_locked_filters({**base, column: [value]})
+            panel.set_title(f"{self.session.label(column)}: {value}")
+            self.splitter.addWidget(panel)
+            self.comparison_panels.append(panel)
+
+        if self.primary is not None:
+            self.primary.setVisible(False)
+        self.splitter.setSizes([1] * self.splitter.count())
+        base_text = ", ".join(f"{k}={v[0]}" for k, v in base.items()) or "all data"
+        self._show_status(f"comparing {column} across {len(values)} values — {base_text}")
+
+    def _clear_comparison(self) -> None:
+        for panel in self.comparison_panels:
+            panel.setParent(None)
+            panel.deleteLater()
+        self.comparison_panels.clear()
+        if self.primary is not None:
+            self.primary.setVisible(True)
+
+    def exit_comparison(self) -> None:
+        if not self.comparison_panels:
+            return
+        self._clear_comparison()
+        self._show_status("comparison closed")
+
     def set_blind(self, enabled: bool) -> None:
-        for panel in filter(None, (self.primary, self.secondary)):
+        for panel in filter(None, (self.primary, self.secondary, *self.comparison_panels)):
             panel.set_blind(enabled)
         self._show_status(
             "Blinded review on — metadata hidden, order randomised"
@@ -243,6 +305,8 @@ class MainWindow(QMainWindow):
             "  1-5 / 0     rate selection / clear rating\n"
             "  R           jump to a random image\n"
             "  Ctrl+D      compare two conditions\n"
+            "  Ctrl+Shift+D  compare along a variable (one panel per value)\n"
+            "  Ctrl+Shift+W  close comparison\n"
             "  Ctrl+B      blinded review\n\n"
             "Image window\n"
             "  Left/Right  step through the current filter\n"

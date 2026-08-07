@@ -145,6 +145,8 @@ class BrowserPanel(QWidget):
         gui_cfg = session.plates[0].cfg.gui
         self.levels = session.display_limits()
         self.blind = False
+        # Filters this panel is pinned to; empty for a normal browsing panel.
+        self.locked_filters: dict[str, list[str]] = {}
         self._windows: list[ImageWindow] = []
 
         self.model = ThumbnailModel(
@@ -206,6 +208,13 @@ class BrowserPanel(QWidget):
         filter_scroll.setWidgetResizable(True)
         filter_scroll.setMinimumWidth(220)
 
+        # Names the slice a comparison panel shows. Sits above the grid rather
+        # than in the side panel so it survives blind mode, which hides the
+        # side panel -- a comparison panel with no visible label is unreadable.
+        self.title_label = QLabel("")
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.hide()
+
         self.count_label = QLabel("—")
         self.metadata = QLabel("Select an image.")
         self.metadata.setWordWrap(True)
@@ -243,6 +252,7 @@ class BrowserPanel(QWidget):
         self.filter_scroll = filter_scroll
 
         layout = QVBoxLayout()
+        layout.addWidget(self.title_label)
         layout.addLayout(top)
         layout.addWidget(splitter, 1)
         self.setLayout(layout)
@@ -252,7 +262,24 @@ class BrowserPanel(QWidget):
     # -- querying ---------------------------------------------------------
 
     def current_filters(self) -> dict[str, list[str]]:
-        return {box.column: box.selected() for box in self.filters if box.selected()}
+        filters = {box.column: box.selected() for box in self.filters if box.selected()}
+        # Locked filters win over the boxes: a comparison panel is *defined* by
+        # its slice (one concentration, one timepoint), so that slice must hold
+        # whatever the user does with the remaining filter controls.
+        filters.update(self.locked_filters)
+        return filters
+
+    def set_title(self, text: str) -> None:
+        self.title_label.setText(f"<b>{text}</b>")
+        self.title_label.setVisible(bool(text))
+
+    def set_locked_filters(self, filters: dict[str, list[str]]) -> None:
+        """Pin this panel to a slice and hide the controls that would fight it."""
+        self.locked_filters = dict(filters)
+        for box in self.filters:
+            if box.column in self.locked_filters:
+                box.setVisible(False)
+        self.refresh()
 
     def refresh(self) -> None:
         order = "RANDOM()" if self.blind else "plate, well_row, well_col, field, channel"
