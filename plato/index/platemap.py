@@ -289,6 +289,13 @@ def read_platemap(
     default_plate: str = "Plate1",
     plate_format: int | None = 96,
 ) -> PlatemapResult:
+    """Dispatch to the reader for ``layout``.
+
+    Callers pick the layout at runtime -- from config, or from ``detect``
+    trying each in turn -- so the branch lives here rather than being repeated
+    at every call site. The signature is spelled out so a caller can pass the
+    whole config without knowing which arguments the chosen layout ignores.
+    """
     if layout == "matrix":
         return read_matrix_platemap(
             path,

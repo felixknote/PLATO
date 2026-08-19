@@ -145,6 +145,9 @@ to gate a pipeline on a clean join.
 | Ctrl+D | compare two conditions side by side |
 | Ctrl+Shift+D | compare along a variable — one image per value, stepped together |
 | ←/→ (comparison) | step only the selected column; click a column to select it |
+| scroll (comparison) | zoom every column, centred on the cursor |
+| drag (comparison) | pan every column |
+| + / − / 0 (comparison) | zoom in / out / reset |
 | Ctrl+Shift+W | close the comparison |
 | Ctrl+B | blinded review |
 | ←/→ (viewer) | step through the current filter |
@@ -177,6 +180,21 @@ the Nth field of one slice is out of focus and you need a comparable one.
 Columns can then fall out of step, so the position label says so and
 **Realign** puts them all back on the selected column's position.
 
+Columns are ordered by the magnitude of their value, not as text, so a dose
+series reads left to right as a dose series: `1/8x  1/4x  1/2x  1x`, not the
+`1/2x  1/4x  1/8x  1x` a plain string sort gives. The same applies to numeric
+concentrations (`2` before `10`) and to timepoints (`T2` before `T10`).
+Controls that carry no number sort to the end rather than into the middle of
+the series, and value lists that are names rather than a series — channels,
+antibiotics — stay alphabetical.
+
+Scroll to zoom, drag to pan; `+`/`−` zoom from the keyboard and `0` resets.
+Zoom is **shared by every column**: the view exists so the only difference
+between columns is the compared variable, and columns showing different
+regions of their images would quietly break that. Zoomed in, the columns
+re-read their images at proportionally more detail rather than magnifying the
+pixels they already had.
+
 **Export what's on screen** writes exactly the visible images, one per column
 — the comparison you are looking at, not the hundred images behind it. Format
 choice, scale-bar baking and shared contrast behave as they do in the grid.
@@ -203,6 +221,7 @@ hit calls, figure selection — score blind and reveal afterwards.
 ```
 config.py     TOML -> dataclasses; nothing experiment-specific is hardcoded
 wells.py      A1 / A01 / a1 -> canonical (row, col). Join failures start here.
+ordering.py   filter values sorted by magnitude, so a dose series reads as one
 index/
   filenames.py  regex -> ImageRecord
   platemap.py   Excel/CSV -> tidy frame, sanitised column names

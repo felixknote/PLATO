@@ -146,7 +146,6 @@ def estimate_display_limits(
     *,
     percentiles: tuple[float, float] = (1.0, 99.5),
     sample_size: int = 200,
-    seed: int = 0,
     workers: int | None = None,
 ) -> dict[str, tuple[float, float]]:
     """Estimate one (lo, hi) pair per channel from a random sample of images.
@@ -155,7 +154,9 @@ def estimate_display_limits(
     than one at a time — with a couple hundred samples per channel this
     otherwise dominates the time before rendering even starts.
     """
-    rng = np.random.default_rng(seed)
+    # Fixed seed: the sample decides the screen-wide display limits, so the
+    # same screen should scale identically every time it is rebuilt.
+    rng = np.random.default_rng(0)
     by_channel: dict[str, list[ThumbnailJob]] = {}
     for job in jobs:
         by_channel.setdefault(job.channel or "_", []).append(job)

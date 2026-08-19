@@ -43,13 +43,10 @@ class Well:
 
     @property
     def row_letter(self) -> str:
-        idx = self.row - 1
-        if idx < 26:
-            return chr(ord("A") + idx)
-        return chr(ord("A") + idx // 26 - 1) + chr(ord("A") + idx % 26)
-
-    def __str__(self) -> str:  # pragma: no cover - trivial
-        return self.label
+        # The largest plate here is 1536-well = 32 rows, so a row is always a
+        # single letter; two-letter rows would need a geometry that does not
+        # exist in PLATE_GEOMETRIES.
+        return chr(ord("A") + self.row - 1)
 
 
 def _letters_to_row(letters: str) -> int:
@@ -94,9 +91,3 @@ def parse_well(raw: object, plate_format: int | None = 96) -> Well:
 def canonical(raw: object, plate_format: int | None = 96) -> str:
     """Convenience wrapper returning the canonical label directly."""
     return parse_well(raw, plate_format).label
-
-
-def all_wells(plate_format: int = 96) -> list[Well]:
-    """Every well of a plate, row-major."""
-    n_rows, n_cols = PLATE_GEOMETRIES[plate_format]
-    return [Well(r, c) for r in range(1, n_rows + 1) for c in range(1, n_cols + 1)]

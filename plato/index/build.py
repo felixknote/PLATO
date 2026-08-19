@@ -23,6 +23,22 @@ from .platemap import plate_from_filename, read_platemap
 
 MAX_EXAMPLES = 20
 
+# The checks that decide whether the join is trustworthy, as
+# (attribute, human-readable label). Both `ok` and `summary()` are driven from
+# this, so a new check is added in one place rather than three.
+PROBLEM_FIELDS: list[tuple[str, str]] = [
+    ("unparsed_files", "filenames not parsed"),
+    ("images_without_platemap", "images with no plate map row"),
+    ("platemap_wells_without_images", "plate map wells with no image"),
+    ("duplicate_platemap_keys", "duplicate plate map keys (extra rows dropped)"),
+    ("duplicate_image_keys", "duplicate image keys"),
+    ("bad_platemap_wells", "unparseable plate map wells"),
+    ("unsplit_platemap_values", "plate map cells not split by pattern"),
+    ("well_point_mismatches", "filename Well/Point disagreements"),
+    ("field_count_outliers", "wells with unusual field count"),
+    ("channel_count_outliers", "wells with unusual channel count"),
+]
+
 
 @dataclass(slots=True)
 class ValidationReport:
@@ -47,20 +63,7 @@ class ValidationReport:
 
     @property
     def ok(self) -> bool:
-        return not any(
-            [
-                self.unparsed_files,
-                self.images_without_platemap,
-                self.platemap_wells_without_images,
-                self.duplicate_platemap_keys,
-                self.duplicate_image_keys,
-                self.bad_platemap_wells,
-                self.unsplit_platemap_values,
-                self.well_point_mismatches,
-                self.field_count_outliers,
-                self.channel_count_outliers,
-            ]
-        )
+        return not any(getattr(self, name) for name, _ in PROBLEM_FIELDS)
 
     def to_json(self, path: Path) -> None:
         path.write_text(json.dumps(asdict(self), indent=2, default=str), encoding="utf-8")
@@ -71,19 +74,8 @@ class ValidationReport:
             f"files parsed:      {self.n_files_parsed}",
             f"plate map rows:    {self.n_platemap_rows}",
         ]
-        problems = [
-            ("filenames not parsed", len(self.unparsed_files)),
-            ("images with no plate map row", len(self.images_without_platemap)),
-            ("plate map wells with no image", len(self.platemap_wells_without_images)),
-            ("duplicate plate map keys (extra rows dropped)", len(self.duplicate_platemap_keys)),
-            ("duplicate image keys", len(self.duplicate_image_keys)),
-            ("unparseable plate map wells", len(self.bad_platemap_wells)),
-            ("plate map cells not split by pattern", len(self.unsplit_platemap_values)),
-            ("filename Well/Point disagreements", len(self.well_point_mismatches)),
-            ("wells with unusual field count", len(self.field_count_outliers)),
-            ("wells with unusual channel count", len(self.channel_count_outliers)),
-        ]
-        for label, count in problems:
+        for name, label in PROBLEM_FIELDS:
+            count = len(getattr(self, name))
             marker = "  " if count == 0 else "! "
             lines.append(f"{marker}{label}: {count}")
         if self.truncated:

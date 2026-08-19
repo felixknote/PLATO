@@ -255,6 +255,11 @@ class IndexDB:
         flagged: bool | None = None,
         note: str | None = None,
     ) -> None:
+        # Read-modify-write rather than COALESCE in SQL: None is overloaded
+        # here. For `flagged`/`note` it means "leave alone", but for `rating`
+        # it is also the value the 0 key writes to *clear* a rating, and
+        # COALESCE cannot tell those apart -- it would silently ignore the
+        # clear. Only the caller's argument list knows which was meant.
         current = self.con.execute(
             "SELECT rating, flagged, note FROM annotations WHERE image_id = ?", (image_id,)
         ).fetchone()
