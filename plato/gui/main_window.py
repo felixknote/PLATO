@@ -26,6 +26,7 @@ from .load_dialog import LoadPlateDialog
 from .panel import BrowserPanel
 from .session import Session
 from .settings import SettingsDialog
+from .theme import TEXT, TEXT_FAINT, TEXT_MUTED
 
 ORGANISATION = "plato"
 
@@ -58,20 +59,36 @@ class MainWindow(QMainWindow):
 
     def _show_empty_state(self) -> None:
         self.setWindowTitle("PLATO")
-        label = QLabel("No data loaded")
-        font = label.font()
-        font.setPointSize(18)
-        label.setFont(font)
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title = QLabel("PLATO")
+        font = title.font()
+        font.setPointSize(30)
+        font.setWeight(font.Weight.DemiBold)
+        title.setFont(font)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(f"color: {TEXT}; letter-spacing: 3px;")
+
+        subtitle = QLabel("Plate-map-aware browsing for high-content screens")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px;")
+
+        hint = QLabel("Choose an image folder and a plate map to get started.")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 12px;")
 
         load_button = QPushButton("Load Data")
         load_button.setFixedWidth(200)
+        load_button.setDefault(True)
         load_button.clicked.connect(self._load_data)
 
         layout = QVBoxLayout()
+        layout.setSpacing(10)
         layout.addStretch(1)
-        layout.addWidget(label, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(subtitle, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(18)
         layout.addWidget(load_button, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(6)
+        layout.addWidget(hint, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(1)
 
         container = QWidget()
@@ -157,40 +174,61 @@ class MainWindow(QMainWindow):
         help_menu.addAction(keys)
 
     def _build_shortcuts(self) -> None:
-        QShortcut(QKeySequence(Qt.Key.Key_Return), self, self._open_current)
-        QShortcut(QKeySequence(Qt.Key.Key_Enter), self, self._open_current)
-        QShortcut(QKeySequence(Qt.Key.Key_Space), self, lambda: self._active_or_none() and self._active().toggle_flag())
-        QShortcut(QKeySequence(Qt.Key.Key_R), self, lambda: self._active_or_none() and self._active().jump_random())
-        for digit in range(1, 6):
-            QShortcut(
-                QKeySequence(str(digit)),
-                self,
-                lambda d=digit: self._active_or_none() and self._active().set_rating(d),
-            )
-        QShortcut(
-            QKeySequence(Qt.Key.Key_0),
-            self,
-            lambda: self._active_or_none() and self._active().set_rating(None),
-        )
+        def on_active(action: str, *args) -> None:
+            """Run a BrowserPanel method, if there is a panel to run it on."""
+            panel = self._active()
+            if panel is not None:
+                getattr(panel, action)(*args)
+
+        self._panel_shortcuts = [
+            QShortcut(QKeySequence(Qt.Key.Key_Return), self, self._open_current),
+            QShortcut(QKeySequence(Qt.Key.Key_Enter), self, self._open_current),
+            QShortcut(QKeySequence(Qt.Key.Key_Space), self, lambda: on_active("toggle_flag")),
+            QShortcut(QKeySequence(Qt.Key.Key_R), self, lambda: on_active("jump_random")),
+            *(
+                QShortcut(
+                    QKeySequence(str(digit)),
+                    self,
+                    lambda d=digit: on_active("set_rating", d),
+                )
+                for digit in range(1, 6)
+            ),
+            QShortcut(QKeySequence(Qt.Key.Key_0), self, lambda: on_active("set_rating", None)),
+        ]
+
+    def _set_panel_shortcuts_enabled(self, enabled: bool) -> None:
+        """Silence the grid's keys while the comparison view owns the window.
+
+        These are window-level shortcuts, so they fire ahead of the focused
+        widget's keyPressEvent. The two sets overlap -- 0 clears a rating in
+        the grid and resets zoom in the comparison -- so the grid's must be
+        switched off for the comparison to receive its own keys at all.
+        """
+        for shortcut in self._panel_shortcuts:
+            shortcut.setEnabled(enabled)
 
     def _show_status(self, message: str) -> None:
         self.statusBar().showMessage(message, 4000)
 
     # -- panels -----------------------------------------------------------
 
-    def _active_or_none(self) -> bool:
-        return self.primary is not None
+    def _active(self) -> BrowserPanel | None:
+        """The panel keyboard actions apply to, or None if there is not one.
 
-    def _active(self) -> BrowserPanel:
+        Returns None while the comparison view is open: its own keys overlap
+        the panel's (0 resets zoom there, clears a rating here) and the
+        window-level shortcuts would otherwise win and act on a hidden grid.
+        """
+        if self.comparison is not None:
+            return None
         if self.secondary is not None and self.secondary.view.hasFocus():
             return self.secondary
         return self.primary
 
     def _open_current(self) -> None:
-        if self.primary is None:
-            return
         panel = self._active()
-        panel.open_viewer(panel.current_index())
+        if panel is not None:
+            panel.open_viewer(panel.current_index())
 
     def set_compare(self, enabled: bool) -> None:
         if self.primary is None or self.splitter is None:
@@ -242,6 +280,8 @@ class MainWindow(QMainWindow):
         self.comparison.export_button.clicked.connect(self._export_comparison)
         self.comparison.set_columns(columns)
         self.splitter.addWidget(self.comparison)
+        self._set_panel_shortcuts_enabled(False)
+        self.comparison.setFocus(Qt.FocusReason.OtherFocusReason)
 
         if self.primary is not None:
             self.primary.setVisible(False)
@@ -266,6 +306,7 @@ class MainWindow(QMainWindow):
             self.comparison.setParent(None)
             self.comparison.deleteLater()
             self.comparison = None
+            self._set_panel_shortcuts_enabled(True)
         if self.primary is not None:
             self.primary.setVisible(True)
 
@@ -329,6 +370,12 @@ class MainWindow(QMainWindow):
             "  Ctrl+Shift+D  compare along a variable (one panel per value)\n"
             "  Ctrl+Shift+W  close comparison\n"
             "  Ctrl+B      blinded review\n\n"
+            "Comparison view\n"
+            "  ←/→         step the selected column (click one to select)\n"
+            "  scroll      zoom all columns, centred on the cursor\n"
+            "  drag        pan all columns\n"
+            "  + / −       zoom in / out\n"
+            "  0           reset zoom\n\n"
             "Image window\n"
             "  Left/Right  step through the current filter\n"
             "  A           toggle per-image autoscale\n"

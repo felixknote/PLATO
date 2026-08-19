@@ -145,8 +145,6 @@ class BrowserPanel(QWidget):
         gui_cfg = session.plates[0].cfg.gui
         self.levels = session.display_limits()
         self.blind = False
-        # Filters this panel is pinned to; empty for a normal browsing panel.
-        self.locked_filters: dict[str, list[str]] = {}
         self._windows: list[ImageWindow] = []
 
         self.model = ThumbnailModel(
@@ -157,11 +155,14 @@ class BrowserPanel(QWidget):
         )
 
         self.view = QListView()
+        self.view.setObjectName("thumbnailGrid")
         self.view.setModel(self.model)
         self.view.setViewMode(QListView.ViewMode.IconMode)
         self.view.setResizeMode(QListView.ResizeMode.Adjust)
         self.view.setUniformItemSizes(True)
-        self.view.setSpacing(4)
+        self.view.setSpacing(6)
+        # The delegate paints a hover tint, which needs hover events tracked.
+        self.view.setMouseTracking(True)
         self.view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.view.setItemDelegate(ThumbnailDelegate(gui_cfg.thumbnail_size, self))
         self.view.doubleClicked.connect(lambda idx: self.open_viewer(idx.row()))
@@ -187,6 +188,8 @@ class BrowserPanel(QWidget):
         self.filters: list[FilterBox] = []
         filter_columns = gui_cfg.filter_fields or session.filter_columns()
         filter_form = QVBoxLayout()
+        filter_form.setContentsMargins(10, 10, 10, 10)
+        filter_form.setSpacing(10)
         for column in filter_columns:
             values = session.distinct(column)
             if not values or len(values) > MAX_DISTINCT_FOR_FILTER:
@@ -206,16 +209,16 @@ class BrowserPanel(QWidget):
         filter_scroll = QScrollArea()
         filter_scroll.setWidget(filter_container)
         filter_scroll.setWidgetResizable(True)
-        filter_scroll.setMinimumWidth(220)
-
-        # Names the slice a comparison panel shows. Sits above the grid rather
-        # than in the side panel so it survives blind mode, which hides the
-        # side panel -- a comparison panel with no visible label is unreadable.
-        self.title_label = QLabel("")
-        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.title_label.hide()
+        # Bounded rather than just a minimum: the sidebar is chrome, and left
+        # free to grow it takes width from the thumbnails, which are the point.
+        filter_scroll.setMinimumWidth(200)
+        filter_scroll.setMaximumWidth(280)
 
         self.count_label = QLabel("—")
+
+        details_heading = QLabel("Details")
+        details_heading.setObjectName("panelHeading")
+
         self.metadata = QLabel("Select an image.")
         self.metadata.setWordWrap(True)
         self.metadata.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -229,17 +232,22 @@ class BrowserPanel(QWidget):
         export_button.clicked.connect(self.export_selected)
 
         side = QVBoxLayout()
+        side.setContentsMargins(12, 10, 12, 10)
+        side.setSpacing(8)
         side.addWidget(self.count_label)
+        side.addWidget(details_heading)
         side.addWidget(self.metadata, 1)
         side.addWidget(random_button)
         side.addWidget(export_button)
         side_container = QWidget()
         side_container.setLayout(side)
-        side_container.setMinimumWidth(240)
+        side_container.setMinimumWidth(230)
+        side_container.setMaximumWidth(320)
         self.side_container = side_container
 
         top = QHBoxLayout()
-        top.addWidget(QLabel("Search"))
+        top.setContentsMargins(12, 10, 12, 6)
+        top.setSpacing(12)
         top.addWidget(self.search, 1)
         top.addWidget(self.flagged_only)
         top.addWidget(self.autoscale_previews)
@@ -251,66 +259,28 @@ class BrowserPanel(QWidget):
         splitter.addWidget(filter_scroll)
         splitter.addWidget(self.view)
         splitter.addWidget(side_container)
+        # The grid is what the window is for; the two sidebars are fixed-width
+        # chrome around it and should not take space from it as the window
+        # grows. Without the explicit sizes they start out sharing it evenly
+        # and the thumbnails render in a narrow strip.
+        splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+        splitter.setSizes([240, 1100, 260])
+        splitter.setChildrenCollapsible(False)
         self.filter_scroll = filter_scroll
 
-        self.header = QHBoxLayout()
-        self.header.addWidget(self.title_label, 1)
-
         layout = QVBoxLayout()
-        layout.addLayout(self.header)
         layout.addWidget(self.search_row)
         layout.addWidget(splitter, 1)
         self.setLayout(layout)
-        self.compact = False
 
         self.refresh()
 
     # -- querying ---------------------------------------------------------
 
     def current_filters(self) -> dict[str, list[str]]:
-        filters = {box.column: box.selected() for box in self.filters if box.selected()}
-        # Locked filters win over the boxes: a comparison panel is *defined* by
-        # its slice (one concentration, one timepoint), so that slice must hold
-        # whatever the user does with the remaining filter controls.
-        filters.update(self.locked_filters)
-        return filters
-
-    def set_title(self, text: str) -> None:
-        self.title_label.setText(f"<b>{text}</b>")
-        self.title_label.setVisible(bool(text))
-
-    def set_locked_filters(self, filters: dict[str, list[str]]) -> None:
-        """Pin this panel to a slice and hide the controls that would fight it."""
-        self.locked_filters = dict(filters)
-        for box in self.filters:
-            if box.column in self.locked_filters:
-                box.setVisible(False)
-        self.refresh()
-
-    def set_compact(self, compact: bool) -> None:
-        """Strip the browsing chrome down to the images.
-
-        A comparison panel is one of several on screen and exists to show a
-        slice, not to browse the screen: its filters are locked, so the filter
-        sidebar cannot change anything, and the search box and metadata panel
-        would each cost more width than the thumbnails they sit beside. At four
-        panels the chrome consumed roughly nine tenths of every panel and the
-        images rendered in a ~30px sliver. Hiding it gives the width back to
-        the only thing being compared.
-
-        The count stays -- panels of different sizes is exactly the kind of
-        asymmetry you want visible when comparing slices.
-        """
-        self.compact = compact
-        self.filter_scroll.setVisible(not compact)
-        self.side_container.setVisible(not compact)
-        self.search_row.setVisible(not compact)
-        self.count_label.setVisible(compact)
-        if compact:
-            # Reparented under the title so the count stays visible once the
-            # side panel that normally holds it is gone.
-            self.header.addWidget(self.count_label)
+        return {box.column: box.selected() for box in self.filters if box.selected()}
 
     def refresh(self) -> None:
         order = "RANDOM()" if self.blind else "plate, well_row, well_col, field, channel"
