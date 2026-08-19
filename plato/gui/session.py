@@ -15,13 +15,14 @@ write back to the plate that actually owns the row.
 
 from __future__ import annotations
 
+import random
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-import re
-
 from ..config import Config
 from ..index.db import ImageRow, IndexDB
+from ..ordering import sort_series
 from ..wells import parse_well
 from .settings import get_show_timepoint
 
@@ -109,12 +110,15 @@ class Session:
         return list(found)
 
     def distinct(self, column: str) -> list[str]:
+        # Sorted by magnitude, not as text: these values become the comparison
+        # view's columns left to right, so "1/8x, 1/4x, 1/2x, 1x" has to read
+        # as the dose series it is rather than "1/2x, 1/4x, 1/8x, 1x".
         if column == TIMEPOINT:
-            return sorted(self.timepoints())
+            return sort_series(self.timepoints())
         values: set[str] = set()
         for plate in self.plates:
             values.update(plate.db.distinct(column))
-        return sorted(values)
+        return sort_series(values)
 
     def count(self) -> int:
         return sum(plate.db.count() for plate in self.plates)
@@ -203,26 +207,19 @@ def _well_key(well: str) -> tuple[int, int]:
 
 
 def _resort(rows: list[ImageRow], order: str) -> list[ImageRow]:
-    if order.strip().upper().startswith("RANDOM"):
-        import random
+    """Re-sort rows merged from several plates.
 
+    Only two orders ever reach here: the default plate/well/field/channel and
+    RANDOM() for blinded review. Wells sort on the parsed (row, col) rather
+    than the label, because "A10" sorts before "A2" as a string, which
+    scrambles plate order and makes two panels non-comparable position for
+    position.
+    """
+    if order.strip().upper().startswith("RANDOM"):
         shuffled = rows[:]
         random.shuffle(shuffled)
         return shuffled
-    keys = [part.strip() for part in order.split(",")]
-    key_getters = {
-        "plate": lambda r: r.plate,
-        # Sort on the parsed (row, col), not the label: "A10" sorts before "A2"
-        # as a string, which scrambles plate order and makes the two panels of
-        # compare mode non-comparable position for position.
-        "well_row": lambda r: _well_key(r.well)[0],
-        "well_col": lambda r: _well_key(r.well)[1],
-        "field": lambda r: r.field or "",
-        "channel": lambda r: r.channel or "",
-        "well": lambda r: r.well,
-        "seq": lambda r: r.metadata.get("seq", "") if r.metadata else "",
-    }
-    getters = [key_getters[k] for k in keys if k in key_getters]
-    if not getters:
-        return rows
-    return sorted(rows, key=lambda r: tuple(g(r) for g in getters))
+    return sorted(
+        rows,
+        key=lambda r: (r.plate, _well_key(r.well), r.field or "", r.channel or ""),
+    )
