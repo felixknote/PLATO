@@ -24,7 +24,8 @@ from .compare_dialog import CompareSetupDialog
 from .compare_view import ComparisonColumn, ComparisonView
 from .load_dialog import LoadPlateDialog
 from .panel import BrowserPanel
-from .session import Session
+from .plates_dialog import PlatesDialog
+from .session import DuplicatePlateError, Session
 from .settings import SettingsDialog
 from .theme import TEXT, TEXT_FAINT, TEXT_MUTED
 
@@ -99,17 +100,89 @@ class MainWindow(QMainWindow):
         dialog = LoadPlateDialog(self, title="Load data")
         if dialog.exec() != LoadPlateDialog.DialogCode.Accepted or dialog.result_config is None:
             return
-        self.session.add_plate(dialog.result_config)
+        if self._add_to_session(dialog.result_config) is None:
+            return
         self._build_browser_ui()
 
     def _add_plate(self) -> None:
         dialog = LoadPlateDialog(self, title="Add plate")
         if dialog.exec() != LoadPlateDialog.DialogCode.Accepted or dialog.result_config is None:
             return
-        self.session.add_plate(dialog.result_config)
+        plate = self._add_to_session(dialog.result_config)
+        if plate is None:
+            return
+        self._plates_changed()
+        self._show_status(
+            f"added {plate.name} — {len(self.session.plates)} plates, "
+            f"{self.session.count()} images total"
+        )
+
+    def _add_to_session(self, cfg) -> object | None:  # noqa: ANN001
+        """Add one plate, reporting a re-add rather than silently doubling it.
+
+        Adding an already-loaded plate is a mistake, not a request: the grid
+        would show every image twice and flagging one copy would leave the
+        other unflagged, which is worse than nothing happening.
+        """
+        try:
+            return self.session.add_plate(cfg)
+        except DuplicatePlateError as exc:
+            QMessageBox.information(
+                self,
+                "Add plate",
+                f"{exc} is already loaded — nothing was added.\n\n"
+                "Loading it twice would show every image twice and split its "
+                "flags across two copies.",
+            )
+            return None
+
+    def _plates_changed(self) -> None:
+        """Push a change in the set of loaded plates through the whole window.
+
+        Filters, pooled display limits and the title all derive from which
+        plates are loaded, so a plain refresh() is not enough: it re-queries
+        with a sidebar that cannot name the plate just added.
+        """
         for panel in filter(None, (self.primary, self.secondary)):
-            panel.refresh()
-        self._show_status(f"added plate — {self.session.count()} images total")
+            panel.plates_changed()
+        # Rows handed to the comparison view carry session_index values that a
+        # removal invalidates, and its columns were built from the old plate
+        # set either way.
+        self._clear_comparison()
+        self._update_title()
+
+    def _update_title(self) -> None:
+        plates = len(self.session.plates)
+        suffix = "" if plates == 1 else f" · {plates} plates"
+        self.setWindowTitle(f"PLATO — {self.session.count()} images{suffix}")
+
+    def _manage_plates(self) -> None:
+        if self.session.is_empty:
+            QMessageBox.information(self, "Plates", "No plates are loaded.")
+            return
+        dialog = PlatesDialog(self.session, self)
+        dialog.exec()
+        if dialog.removed:
+            if self.session.is_empty:
+                # Every panel now queries an empty session; the empty state is
+                # the honest screen for that, and rebuilding from scratch on
+                # the next load is cheaper than teaching the panels to be empty.
+                self._teardown_browser_ui()
+                self._show_status("all plates removed")
+                return
+            self._plates_changed()
+            self._show_status(
+                f"{len(self.session.plates)} plates, {self.session.count()} images total"
+            )
+
+    def _teardown_browser_ui(self) -> None:
+        self._clear_comparison()
+        if self.compare_action.isChecked():
+            self.compare_action.setChecked(False)
+        self.splitter = None
+        self.primary = None
+        self.secondary = None
+        self._show_empty_state()
 
     # -- browser chrome -------------------------------------------------------
 
@@ -121,8 +194,8 @@ class MainWindow(QMainWindow):
             self.splitter.addWidget(self.primary)
             self.setCentralWidget(self.splitter)
         else:
-            self.primary.refresh()
-        self.setWindowTitle(f"PLATO — {self.session.count()} images")
+            self.primary.plates_changed()
+        self._update_title()
 
     def _build_menu(self) -> None:
         data_menu = self.menuBar().addMenu("&Data")
@@ -134,6 +207,10 @@ class MainWindow(QMainWindow):
         self.add_plate_action = QAction("Add Plate…", self)
         self.add_plate_action.triggered.connect(self._add_plate)
         data_menu.addAction(self.add_plate_action)
+
+        self.manage_plates_action = QAction("Loaded Plates…", self)
+        self.manage_plates_action.triggered.connect(self._manage_plates)
+        data_menu.addAction(self.manage_plates_action)
 
         export = QAction("Export flags and ratings as CSV…", self)
         export.triggered.connect(self.export_annotations)

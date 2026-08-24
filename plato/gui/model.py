@@ -171,6 +171,12 @@ class ThumbnailModel(QAbstractListModel):
             if f in row.metadata and row.metadata[f] is not None
         ]
         head = row.well if not parts else f"{row.well}  {' · '.join(parts)}"
+        # With several plates loaded, the well alone does not identify a tile:
+        # every plate has an A01, and the `plate` column is often the same
+        # string in all of them. Prefixing the loaded-plate name is what makes
+        # two A01 tiles side by side readable as two different plates.
+        if len(self._session.plates) > 1:
+            head = f"{self._session.plates[row.session_index].name} · {head}"
         return head
 
     # -- QAbstractListModel ----------------------------------------------
@@ -192,7 +198,11 @@ class ThumbnailModel(QAbstractListModel):
             meta = "\n".join(
                 f"{k}: {v}" for k, v in row.metadata.items() if v is not None
             )
-            return f"{row.image_id}\n{row.plate} {row.well}\n{meta}"
+            source = self._session.plates[row.session_index]
+            return (
+                f"{row.image_id}\n{source.name} · {row.plate} {row.well}"
+                f"\n{source.source}\n{meta}"
+            )
         if role == Qt.ItemDataRole.DecorationRole:
             key = self._key(row)
             pixmap = self._pixmaps.get(key)

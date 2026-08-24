@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -129,6 +129,16 @@ class FilterBox(QGroupBox):
     def selected(self) -> list[str]:
         return [item.text() for item in self.list.selectedItems()]
 
+    def set_selected(self, values: list[str]) -> None:
+        """Select by value. Values this box does not offer are ignored."""
+        if not values:
+            return
+        wanted = set(values)
+        with QSignalBlocker(self.list):
+            for position in range(self.list.count()):
+                item = self.list.item(position)
+                item.setSelected(item.text() in wanted)
+
     def clear(self) -> None:
         self.list.clearSelection()
 
@@ -186,26 +196,17 @@ class BrowserPanel(QWidget):
         self.autoscale_previews.toggled.connect(self.model.set_autoscale)
 
         self.filters: list[FilterBox] = []
-        filter_columns = gui_cfg.filter_fields or session.filter_columns()
-        filter_form = QVBoxLayout()
-        filter_form.setContentsMargins(10, 10, 10, 10)
-        filter_form.setSpacing(10)
-        for column in filter_columns:
-            values = session.distinct(column)
-            if not values or len(values) > MAX_DISTINCT_FOR_FILTER:
-                continue
-            box = FilterBox(column, session.label(column), values)
-            box.changed.connect(self.refresh)
-            self.filters.append(box)
-            filter_form.addWidget(box)
-        filter_form.addStretch(1)
+        self._filter_fields = gui_cfg.filter_fields
+        self.filter_layout = QVBoxLayout()
+        self.filter_layout.setContentsMargins(10, 10, 10, 10)
+        self.filter_layout.setSpacing(10)
 
-        clear_button = QPushButton("Clear all filters")
-        clear_button.clicked.connect(self.clear_filters)
-        filter_form.addWidget(clear_button)
+        self._clear_button = QPushButton("Clear all filters")
+        self._clear_button.clicked.connect(self.clear_filters)
+        self._build_filters()
 
         filter_container = QWidget()
-        filter_container.setLayout(filter_form)
+        filter_container.setLayout(self.filter_layout)
         filter_scroll = QScrollArea()
         filter_scroll.setWidget(filter_container)
         filter_scroll.setWidgetResizable(True)
@@ -277,6 +278,62 @@ class BrowserPanel(QWidget):
 
         self.refresh()
 
+    # -- filters ----------------------------------------------------------
+
+    def _build_filters(self, keep: dict[str, list[str]] | None = None) -> None:
+        """(Re)populate the filter sidebar from the session's current plates.
+
+        Rebuilt rather than built once, because adding or removing a plate
+        changes what there is to filter by: a new plate brings its own plate
+        name, possibly a new timepoint, and metadata values the first plate
+        never had. Leaving the sidebar as it was built at construction meant
+        an added plate could not be filtered to at all -- the one thing you
+        want to do straight after adding it.
+
+        ``keep`` re-applies selections by value, so a rebuild does not silently
+        drop the filter the grid is currently showing. Values that the new set
+        of plates no longer offers are dropped, which is the honest outcome:
+        the rows behind them are gone too.
+        """
+        keep = keep if keep is not None else self.current_filters()
+        self.filters.clear()
+        # Taken out first so the teardown below cannot reparent it: it is
+        # reused across rebuilds, unlike the boxes, which are discarded.
+        self.filter_layout.removeWidget(self._clear_button)
+        while self.filter_layout.count():
+            item = self.filter_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        columns = self._filter_fields or self.session.filter_columns()
+        for column in columns:
+            values = self.session.distinct(column)
+            if not values or len(values) > MAX_DISTINCT_FOR_FILTER:
+                continue
+            box = FilterBox(column, self.session.label(column), values)
+            box.set_selected(keep.get(column, []))
+            box.changed.connect(self.refresh)
+            self.filters.append(box)
+            self.filter_layout.addWidget(box)
+        self.filter_layout.addStretch(1)
+        self.filter_layout.addWidget(self._clear_button)
+
+    def plates_changed(self) -> None:
+        """Re-read everything derived from the set of loaded plates.
+
+        Called after Add Plate / Remove Plate. Display limits are pooled across
+        plates, so they change when the set does; recomputing them here is what
+        stops a newly added plate's channels from having no limits at all in
+        the viewer and in JPEG export, which rendered them by each image's own
+        min/max -- per-image autoscaling by accident, in the one place the app
+        is emphatic about not doing that.
+        """
+        self.levels = self.session.display_limits()
+        self._build_filters()
+        self.refresh()
+
     # -- querying ---------------------------------------------------------
 
     def current_filters(self) -> dict[str, list[str]]:
@@ -330,9 +387,8 @@ class BrowserPanel(QWidget):
         rows = self.model.rows()
         if not rows or position < 0:
             return
-        cfg = self.session.plates[rows[position].session_index].cfg
         window = ImageWindow(
-            cfg, rows, position, self.levels, blind=self.blind, parent=self
+            self.session, rows, position, self.levels, blind=self.blind, parent=self
         )
         window.setWindowFlag(Qt.WindowType.Window, True)
         window.show()
@@ -444,6 +500,11 @@ class BrowserPanel(QWidget):
             f"field {row.field or '-'} · channel {row.channel or '-'}",
             "",
         ]
+        if len(self.session.plates) > 1:
+            # The `plate` column comes from the filename/plate map and can be
+            # the same string in two separately loaded plates; the session's
+            # name is the disambiguated one, so it says which of them this is.
+            lines.insert(1, f"loaded plate: <b>{self.session.plates[row.session_index].name}</b>")
         lines += [
             f"{self.session.label(key)}: <b>{value}</b>"
             for key, value in row.metadata.items()

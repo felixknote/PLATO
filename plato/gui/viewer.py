@@ -24,9 +24,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..config import Config
 from ..index.db import ImageRow
 from .scalebar import bar_length_um
+from .session import Session
 from .settings import get_nm_per_pixel, get_scale_bar_fraction
 
 pg.setConfigOption("imageAxisOrder", "row-major")
@@ -46,7 +46,7 @@ class ImageWindow(QMainWindow):
 
     def __init__(
         self,
-        cfg: Config,
+        session: Session,
         rows: list[ImageRow],
         start: int,
         levels: dict[str, tuple[float, float]],
@@ -55,7 +55,11 @@ class ImageWindow(QMainWindow):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.cfg = cfg
+        # The session rather than one plate's Config: left/right steps through
+        # the filtered list, which in a multi-plate session crosses from one
+        # plate into another, so a single Config would be wrong for most of
+        # the rows in the window. (It was also never read.)
+        self.session = session
         self.rows = rows
         self.position = start
         self.levels = levels
@@ -245,12 +249,23 @@ class ImageWindow(QMainWindow):
                 "the browser window to reveal it."
             )
         else:
-            self.setWindowTitle(f"{row.image_id}  ({self.position + 1}/{len(self.rows)})")
+            plates = self.session.plates
+            source = plates[row.session_index] if row.session_index < len(plates) else None
+            # image_id is a path relative to one plate's image root, so it is
+            # not unique across a multi-plate list. Naming the loaded plate in
+            # the title is what keeps two identically named files apart as you
+            # step from one plate into the next.
+            prefix = f"{source.name} · " if source is not None and len(plates) > 1 else ""
+            self.setWindowTitle(
+                f"{prefix}{row.image_id}  ({self.position + 1}/{len(self.rows)})"
+            )
             lines = [
                 f"<b>{row.plate} {row.well}</b>",
                 f"field {row.field or '-'} · channel {row.channel or '-'}",
                 "",
             ]
+            if source is not None and len(plates) > 1:
+                lines.insert(1, f"loaded plate: <b>{source.name}</b>")
             lines += [
                 f"{key}: <b>{value}</b>"
                 for key, value in row.metadata.items()

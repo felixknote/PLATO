@@ -203,6 +203,55 @@ If nothing is held constant, each column mixes every condition at that value,
 which looks like a comparison and is not one; the dialog says so rather than
 letting it through quietly.
 
+## Working with several plates
+
+**Data → Add Plate…** loads another image folder and plate map alongside the
+ones already open. Each plate keeps its own index database and thumbnail
+cache — nothing is re-indexed — and the grid, the filters, the search and the
+comparison view all query the union.
+
+**Data → Loaded Plates…** lists what is open, with the image count and source
+folder of each, and removes one. Removing unloads it from the session only:
+the images, flags and ratings stay on disk, and adding it again brings them
+back.
+
+Three things this has to get right, because a screen is rarely one plate:
+
+**Telling two plates apart.** The `plate` column comes from your filenames or
+plate map, and for a series of folders indexed with the same config it is the
+same string in every one of them — every row says `Plate1`. Filtering on it
+then selects all of them at once. So the session gives each loaded plate a
+name of its own (the plate map's `plate_pattern` match, else the image folder
+name), disambiguated to `name (2)` if two collide, and offers it as its own
+**Loaded Plate** filter once more than one is open. That name also prefixes
+the thumbnail captions, appears in the metadata panel and the viewer title,
+and is matched by the search box.
+
+**Contrast across plates.** Each plate estimates its own per-channel display
+limits from its own images, so plates imaged on different days arrive with
+different ones. Taking the first plate's and applying them to the rest makes
+a brightness difference between plates a difference in *scaling*, in a view
+whose whole premise is that it is a difference in the sample. The limits are
+therefore pooled — lowest lo, highest hi — so one window contains every
+plate's data and all of them are stretched identically. A dim plate stays
+visibly dim rather than being levelled up to look like the bright one.
+
+**Not loading the same plate twice.** Adding a plate whose index is already
+open is refused rather than doubling the grid: every image would appear
+twice, every count would be wrong, and flagging one copy would leave the
+other unflagged.
+
+Ordering keeps each plate contiguous rather than interleaving them by well,
+so scrolling reads as one plate after another. Exported annotations carry
+`session_plate`, `plate_source` and a `uid` keyed on the owning index
+database, so a batch export from a multi-plate session can be traced back to
+actual files — `image_id` alone is only unique within one plate.
+
+If your plate folders are named `P13_T1`, `P13_T2` and so on, the trailing
+`_T<n>` is also offered as a **timepoint** filter, which slices across plates
+(all T1 wells, regardless of plate). Turn it off in Settings if your folder
+names end in something that is not a timepoint.
+
 ## Two things that are deliberate, not oversights
 
 **Contrast is fixed per channel across the whole screen.** Limits are estimated
@@ -230,9 +279,11 @@ index/
 cache/
   thumbnails.py offline PNG cache in SQLite, fixed per-channel levels
 gui/
+  session.py    several IndexDBs unioned behind one query API; plate identity
   model.py      QAbstractListModel, thumbnails fetched off-thread
   delegate.py   tile painting
   panel.py      filters + grid + metadata (one panel; two = compare mode)
+  plates_dialog.py  what is loaded, and unloading one
   viewer.py     pyqtgraph full-resolution window
   main_window.py
 ```
@@ -296,11 +347,11 @@ lookup (~0 ms) rather than a ~33 ms decode per column.
   would need OME-Zarr and a different viewer.
 - Ratings are per image, not per well. If you want well-level scoring, add a
   second annotations table keyed on `(plate, well)`.
-- In a multi-plate session the display limits of the first-loaded plate are
-  used for all of them (`Session.display_limits` merges with `setdefault`).
-  Plates imaged on different days can therefore render inconsistently, which
-  matters most when comparing across timepoints — pooling the samples across
-  loaded plates would fix it.
+- Display limits are pooled across loaded plates by taking the widest window
+  (lowest lo, highest hi), not re-estimated from a sample drawn across all of
+  them. A plate with one very bright outlier therefore widens the window for
+  every plate. Re-sampling across the union would be more precise and would
+  mean re-reading images at load time.
 - Blinded review hides the metadata and randomises order, but does not clear
   the filters. Filtering to one condition and then entering blind mode leaves
   you scoring a set you already know the label of.
@@ -308,6 +359,10 @@ lookup (~0 ms) rather than a ~33 ms decode per column.
 ## Tests
 
 ```bash
-pytest -q                                              # indexing layer
+pytest -q                                              # indexing + session layers
 QT_QPA_PLATFORM=offscreen python tests/test_gui_smoke.py /tmp/demo/plato.toml
 ```
+
+`tests/test_session.py` covers what only goes wrong once a second plate is
+loaded — plate identity, pooled contrast, and merging two sorted result sets
+— without needing Qt to be on screen.

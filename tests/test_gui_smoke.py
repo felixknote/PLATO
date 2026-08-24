@@ -10,6 +10,7 @@ already-built Config, same as LoadPlateDialog would produce on accept).
 
 from __future__ import annotations
 
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import QApplication
 
 from plato.config import load_config
 from plato.gui.main_window import MainWindow
-from plato.gui.session import Session
+from plato.gui.session import SOURCE_PLATE, DuplicatePlateError, Session
 from plato.index.db import IndexDB
 
 
@@ -75,6 +76,11 @@ def main(config_path: str) -> int:
         panel.view.selectionModel().SelectionFlag.Select,
     )
     target = panel.model.row_at(0)
+    # toggle_flag flips, so a rerun over a database that kept the last run's
+    # flag would clear it and the assertion below would fail on state rather
+    # than on behaviour. Start from unflagged.
+    if target.flagged:
+        panel.toggle_flag()
     panel.toggle_flag()
     panel.set_rating(4)
     app.processEvents()
@@ -109,17 +115,83 @@ def main(config_path: str) -> int:
     window.compare_action.setChecked(False)
     app.processEvents()
 
-    # Add Plate: load the same plate again as a second plate and confirm the
-    # combined grid grows (separate DB per plate, unioned at query time).
+    # Re-adding a loaded plate is refused rather than doubling the grid.
     before = session.count()
+    try:
+        session.add_plate(load_config(config_path))
+    except DuplicatePlateError as exc:
+        print(f"re-adding the same plate refused: {exc}")
+    else:
+        raise AssertionError("adding an already-loaded plate should raise")
+    assert session.count() == before, "a refused add must not change the session"
+
+    # Add Plate: a genuinely second plate, with its own index database. Built
+    # by copying the first plate's .plato/ so the test needs no second dataset;
+    # a different db_path is what makes it a different plate to the session.
+    second_root = Path(config_path).parent / "second_plate"
+    if second_root.exists():
+        shutil.rmtree(second_root)
+    shutil.copytree(Path(config_path).parent / ".plato", second_root)
     second_cfg = load_config(config_path)
+    second_cfg.project.work_dir = second_root
     second_cfg.project.name = "second"
     session.add_plate(second_cfg)
-    panel.refresh()
+    window._plates_changed()
     app.processEvents()
     assert session.count() == before * 2
     assert panel.model.rowCount() == before * 2
     print(f"after add plate: {panel.model.rowCount()} rows across {len(session.plates)} plates")
+
+    # The sidebar must now offer the loaded-plate filter, or the plate just
+    # added cannot be filtered to. The `plate` column cannot serve: both
+    # plates were indexed with the same config, so both label every row
+    # "Plate1" and selecting it selects both.
+    source_box = next((b for b in panel.filters if b.column == SOURCE_PLATE), None)
+    assert source_box is not None, "loaded plate should be offered as a filter"
+    offered = [source_box.list.item(i).text() for i in range(source_box.list.count())]
+    assert offered == session.plate_names, offered
+    print(f"loaded-plate filter offers: {offered}")
+
+    # set_selected is the silent restore used during a rebuild, so a
+    # programmatic selection has to ask for the requery itself.
+    source_box.set_selected([offered[1]])
+    panel.refresh()
+    app.processEvents()
+    assert panel.model.rowCount() == before, panel.model.rowCount()
+    assert all(r.session_index == 1 for r in panel.model.rows())
+    print(
+        f"filtering to '{offered[1]}' isolates {panel.model.rowCount()} "
+        "rows from that plate alone"
+    )
+    source_box.clear()
+    panel.refresh()
+    app.processEvents()
+
+    # A name collision is disambiguated rather than left ambiguous on screen.
+    third_root = Path(config_path).parent / "third_plate"
+    if third_root.exists():
+        shutil.rmtree(third_root)
+    shutil.copytree(Path(config_path).parent / ".plato", third_root)
+    third_cfg = load_config(config_path)
+    third_cfg.project.work_dir = third_root
+    third_cfg.project.name = "second"
+    third = session.add_plate(third_cfg)
+    assert third.name == "second (2)", third.name
+    print(f"name collision disambiguated to: {third.name}")
+
+    # Removal unloads exactly one plate and leaves the rest queryable.
+    session.remove_plate(2)
+    window._plates_changed()
+    app.processEvents()
+    assert len(session.plates) == 2
+    assert panel.model.rowCount() == before * 2
+    print(f"after remove: {panel.model.rowCount()} rows across {len(session.plates)} plates")
+
+    # Annotations from a multi-plate session name the plate they came from.
+    exported = session.export_annotations()
+    assert exported, "the earlier flag should still be exported"
+    assert all("session_plate" in row and "uid" in row for row in exported)
+    print(f"annotation export tags {len(exported)} row(s) with their plate")
 
     window.close()
     print("\nGUI smoke test passed")
