@@ -75,6 +75,7 @@ from ..data.projection import METHODS, TSNE, UMAP, ProjectionCache, ProjectionPa
 from ..gui.theme import BORDER, SURFACE, TEXT, TEXT_FAINT, TEXT_MUTED
 from ..gui.viewer import ImageWindow
 from .palette import UNKNOWN_COLOUR, colours_for, is_unknown, sort_values
+from .gallery import SelectionGallery
 from .preview import PreviewPane
 from .scatter import EmbeddingScatter
 
@@ -367,6 +368,21 @@ class EmbeddingExplorer(QWidget):
         self.legend_box.setChecked(True)
         self.legend_box.toggled.connect(self._redraw)
 
+        self.density_box = QCheckBox("Density")
+        self.density_box.setToolTip(
+            "Draw where points are concentrated instead of every mark.\n"
+            "At tens of thousands of points the marks overlap into a solid "
+            "blob; density shows how many, not merely 'at least one'."
+        )
+        self.density_box.toggled.connect(self._on_density_toggled)
+
+        self.lasso_box = QCheckBox("Lasso select")
+        self.lasso_box.setToolTip(
+            "Click to start an outline, move to trace it, click again to "
+            "close.\nThe images inside appear below the plot."
+        )
+        self.lasso_box.toggled.connect(self._on_lasso_toggled)
+
         self.dim_others_box = QCheckBox("Grey out unannotated")
         self.dim_others_box.setChecked(True)
         self.dim_others_box.setToolTip(
@@ -382,6 +398,8 @@ class EmbeddingExplorer(QWidget):
         display_form.addRow("Opacity", self.opacity_slider)
         display_form.addRow(self.legend_box)
         display_form.addRow(self.dim_others_box)
+        display_form.addRow(self.density_box)
+        display_form.addRow(self.lasso_box)
         display_group = QGroupBox("Display")
         display_group.setLayout(display_form)
 
@@ -418,6 +436,11 @@ class EmbeddingExplorer(QWidget):
         self.scatter = EmbeddingScatter()
         self.scatter.point_hovered.connect(self._on_hover)
         self.scatter.point_clicked.connect(self._on_click)
+        self.scatter.points_selected.connect(self._on_selection)
+
+        self.gallery = SelectionGallery()
+        self.gallery.row_activated.connect(self._on_click)
+        self.gallery.hide()
 
         self.message = QLabel("")
         self.message.setWordWrap(True)
@@ -449,6 +472,7 @@ class EmbeddingExplorer(QWidget):
         centre.addWidget(toolbar_widget)
         centre.addWidget(self.message, 1)
         centre.addWidget(self.scatter, 1)
+        centre.addWidget(self.gallery)
         centre_widget = QWidget()
         centre_widget.setLayout(centre)
 
@@ -952,11 +976,51 @@ class EmbeddingExplorer(QWidget):
             reset_view=reset_view,
         )
 
+        if self.density_box.isChecked():
+            self.scatter.set_density(True)
+
         label = field_label(column) if column else ""
         extra = "" if len(ordered) <= MAX_LEGEND_ENTRIES else f" · {len(ordered)} values"
         self.count_label.setText(
             f"<b>{len(coords):,}</b> of {len(rows):,} points · {label}{extra}"
         )
+
+    # -- selection --------------------------------------------------------
+
+    def _on_density_toggled(self, enabled: bool) -> None:
+        self.scatter.set_density(enabled)
+        # A legend of colours means nothing when colour encodes density.
+        self.legend_box.setEnabled(not enabled)
+        self.colour_box.setEnabled(not enabled)
+        self.status.emit("density" if enabled else "points")
+
+    def _on_lasso_toggled(self, enabled: bool) -> None:
+        self.scatter.set_lasso(enabled)
+        self.gallery.setVisible(enabled)
+        if not enabled:
+            self.scatter.clear_selection()
+        else:
+            self.status.emit("click to start an outline, click again to close it")
+
+    def _on_selection(self, rows) -> None:
+        """Show the images behind a lasso'd region."""
+        if self.frame is None or rows is None or len(rows) == 0:
+            self.gallery.show_selection([], 0)
+            return
+
+        entries: list[tuple[int, Path]] = []
+        # Resolving a path is a filesystem stat per row, so stop once there
+        # are enough tiles to fill the grid rather than checking thousands.
+        from .gallery import MAX_TILES
+
+        for row_index in rows:
+            path = self._path_for(int(row_index))
+            if path is not None:
+                entries.append((int(row_index), path))
+                if len(entries) >= MAX_TILES:
+                    break
+        self.gallery.show_selection(entries, len(rows))
+        self.status.emit(f"{len(rows):,} points selected")
 
     # -- interaction ------------------------------------------------------
 
