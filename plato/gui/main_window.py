@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 from ..data.session import DuplicatePlateError, Session
 from ..views.browser_arm import BrowserArm
 from ..views.explorer import EmbeddingExplorer
+from .branding import DISPLAY_STACK, WORDMARK_TRACKING, logo_pixmap
 from .load_dialog import LoadPlateDialog
 from .plates_dialog import PlatesDialog
 from .settings import SettingsDialog
@@ -77,17 +78,32 @@ class MainWindow(QMainWindow):
 
     def _show_empty_state(self) -> None:
         self.setWindowTitle("PLATO")
+
+        mark = QLabel()
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pixmap = logo_pixmap(132)
+        if not pixmap.isNull():
+            mark.setPixmap(pixmap)
+
         title = QLabel("PLATO")
-        font = title.font()
-        font.setPointSize(30)
-        font.setWeight(font.Weight.DemiBold)
-        title.setFont(font)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet(f"color: {TEXT}; letter-spacing: 3px;")
+        # Tracking is what makes five capitals read as a mark rather than a
+        # word; the display face carries the rest of the character.
+        title.setStyleSheet(
+            f"color: {TEXT}; font-family: {DISPLAY_STACK}; font-size: 42px;"
+            f"font-weight: 600; letter-spacing: {WORDMARK_TRACKING}em;"
+            # The tracking adds space after the final letter too, which throws
+            # the mark visibly off-centre under an image; pad the other side to
+            # put it back.
+            f"padding-left: {WORDMARK_TRACKING}em;"
+        )
 
         subtitle = QLabel("Plate-map-aware browsing for high-content screens")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 14px;")
+        subtitle.setStyleSheet(
+            f"color: {TEXT_MUTED}; font-size: 14px; font-family: {DISPLAY_STACK};"
+            "letter-spacing: 0.02em;"
+        )
 
         hint = QLabel("Choose an image folder and a plate map to get started.")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -109,6 +125,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         layout.setSpacing(10)
         layout.addStretch(1)
+        layout.addWidget(mark, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(14)
         layout.addWidget(title, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addSpacing(18)

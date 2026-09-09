@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSplitter,
     QVBoxLayout,
@@ -196,15 +197,26 @@ class EmbeddingExplorer(QWidget):
     def _build_ui(self) -> None:
         # --- left: data + projection controls
         self.dataset_box = QComboBox()
-        self.dataset_box.setMinimumWidth(180)
+        # A long dataset name must not widen the sidebar; elide it instead.
+        self.dataset_box.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.dataset_box.setMinimumContentsLength(12)
+        self.dataset_box.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
         self.dataset_box.currentIndexChanged.connect(self._on_dataset_changed)
 
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse_for_dataset)
 
-        source_row = QHBoxLayout()
+        # Stacked, not side by side: the two together are the widest row in
+        # the panel and would force the whole sidebar wider than the plot can
+        # spare.
+        source_row = QVBoxLayout()
         source_row.setContentsMargins(0, 0, 0, 0)
-        source_row.addWidget(self.dataset_box, 1)
+        source_row.setSpacing(4)
+        source_row.addWidget(self.dataset_box)
         source_row.addWidget(browse)
         source_widget = QWidget()
         source_widget.setLayout(source_row)
@@ -298,8 +310,11 @@ class EmbeddingExplorer(QWidget):
         left_scroll = QScrollArea()
         left_scroll.setWidget(left_container)
         left_scroll.setWidgetResizable(True)
-        left_scroll.setMinimumWidth(240)
-        left_scroll.setMaximumWidth(300)
+        left_scroll.setMinimumWidth(290)
+        left_scroll.setMaximumWidth(340)
+        # Never a horizontal scrollbar: the controls should wrap into the
+        # width they are given, not slide out of reach under one.
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         # --- centre: the plot
         self.scatter = EmbeddingScatter()
@@ -334,7 +349,7 @@ class EmbeddingExplorer(QWidget):
         centre.setContentsMargins(0, 0, 0, 0)
         centre.setSpacing(0)
         centre.addWidget(toolbar_widget)
-        centre.addWidget(self.message)
+        centre.addWidget(self.message, 1)
         centre.addWidget(self.scatter, 1)
         centre_widget = QWidget()
         centre_widget.setLayout(centre)
@@ -365,7 +380,7 @@ class EmbeddingExplorer(QWidget):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([260, 1100, 300])
+        splitter.setSizes([300, 1060, 300])
         splitter.setChildrenCollapsible(False)
 
         layout = QVBoxLayout()

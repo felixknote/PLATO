@@ -14,6 +14,8 @@ names used as selectors below.
 from __future__ import annotations
 
 from PySide6.QtGui import QColor, QPalette
+
+from .branding import DISPLAY_STACK
 from PySide6.QtWidgets import QApplication
 
 # Neutral greys, dark to light. Kept a touch blue to avoid the muddy look flat
@@ -265,12 +267,39 @@ QLabel#comparisonImage {{
     border-radius: 6px;
 }}
 
-/* Section headings in side panels. */
+/* Section headings in side panels, and the tab bar: the display face here
+   ties the chrome to the wordmark without touching body text. */
 QLabel#panelHeading {{
     color: {TEXT_MUTED};
+    font-family: {DISPLAY_STACK};
     font-size: 12px;
     font-weight: 600;
+    letter-spacing: 0.09em;
     text-transform: uppercase;
+}}
+
+QTabBar::tab {{
+    background: {SURFACE};
+    color: {TEXT_MUTED};
+    font-family: {DISPLAY_STACK};
+    font-size: 13px;
+    letter-spacing: 0.05em;
+    padding: 8px 20px;
+    border: 1px solid {BORDER};
+    border-bottom: none;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+    margin-right: 2px;
+}}
+QTabBar::tab:selected {{
+    background: {SURFACE_RAISED};
+    color: {TEXT};
+    border-bottom: 2px solid {ACCENT};
+}}
+QTabBar::tab:hover:!selected {{ color: {TEXT}; }}
+QTabWidget::pane {{
+    border: 1px solid {BORDER};
+    top: -1px;
 }}
 
 QDialogButtonBox QPushButton {{ min-width: 84px; }}
