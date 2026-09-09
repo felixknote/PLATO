@@ -23,10 +23,29 @@ import pytest
 from plato.data.index.platemap import read_platemap
 from plato.gui.detect import detect_platemap_layout
 
-MAPS = Path(
-    r"Z:\Data\FK_P001_EX0039_2026_08_28_CRISPRI & ABx Experiment\Plate_Maps"
+from conftest import image_root  # noqa: E402
+
+
+def _plate_maps() -> Path | None:
+    """A Plate_Maps folder under the configured image root, if there is one.
+
+    Searched for rather than named: the screen's folder name differs between
+    machines and changes over time.
+    """
+    root = image_root()
+    if root is None:
+        return None
+    for candidate in [root, *sorted(d for d in root.iterdir() if d.is_dir())]:
+        maps = candidate / "Plate_Maps"
+        if maps.is_dir():
+            return maps
+    return None
+
+
+MAPS = _plate_maps()
+needs_share = pytest.mark.skipif(
+    MAPS is None, reason="set PLATO_TEST_IMAGE_ROOT to a screen with Plate_Maps"
 )
-needs_share = pytest.mark.skipif(not MAPS.is_dir(), reason="plate map share not mounted")
 
 ROWS = list("ABCDEFGH")
 

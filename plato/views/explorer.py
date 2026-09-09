@@ -71,6 +71,13 @@ from ..data.explorer_model import (
     filter_fields,
 )
 from ..data.index.db import ImageRow
+from ..data.locations import (
+    DATA_LIBRARY,
+    IMAGE_ROOT,
+    get_root,
+    guess_data_library,
+    set_root,
+)
 from ..data.projection import METHODS, TSNE, UMAP, ProjectionCache, ProjectionParams, project
 from ..gui.theme import BORDER, SURFACE, TEXT, TEXT_FAINT, TEXT_MUTED
 from ..gui.viewer import ImageWindow
@@ -86,60 +93,47 @@ MAX_LEGEND_ENTRIES = 24
 # Filter lists longer than this are searchable rather than fully listed.
 MAX_FILTER_VALUES = 120
 
-# Fallback location of the original micrographs, used only when no loaded
-# plate points at them -- which is the case when the explorer is opened
-# straight from the empty state. Overridable with PLATO_IMAGE_ROOT so this is
-# a default rather than an assumption baked into the code.
-DEFAULT_IMAGE_ROOT = Path(
-    os.environ.get(
-        "PLATO_IMAGE_ROOT",
-        r"Z:\Data\FK_P001_EX0039_2026_08_28_CRISPRI & ABx Experiment",
-    )
-)
-
-# The library every screen lives under. Each DINO export was extracted
-# from a different one, so the right image root is dataset-specific and
-# has to be discovered rather than configured once.
-DATA_LIBRARY = Path(os.environ.get("PLATO_DATA_ROOT", r"Z:\Data"))
+# Where the original micrographs live is configuration, not a constant: every
+# installation keeps them somewhere different, and a baked-in drive letter
+# works on exactly one machine. See plato.data.locations.
 
 
-class _WorkerSignals(QObject):
-    finished = Signal(object)
-    failed = Signal(str)
-    progress = Signal(str)
-    # (fraction 0..1, phase) from the backend's own reporting.
-    advanced = Signal(float, str)
+class _ResolveSignals(QObject):
+    found = Signal(str, object)  # dataset key, ImageResolver | None
+    ambiguous = Signal(str, list)
 
 
-class _ProjectionTask(QRunnable):
-    """Runs one projection off the GUI thread."""
+class _ResolveTask(QRunnable):
+    """Hunts for a dataset's image root without blocking the window.
 
-    def __init__(self, vectors, params, fingerprint, cache, signals) -> None:
+    Probing one candidate root costs a directory stat per sampled row, which
+    on a network share is ~0.3 s. With ~30 screens in the data library that is
+    9-12 s -- and it used to run on the GUI thread while the explorer opened,
+    so the window simply froze. The plot does not need the answer: only hover
+    previews do, and those come later.
+    """
+
+    def __init__(self, key, frame, candidates, signals) -> None:
         super().__init__()
-        self._vectors = vectors
-        self._params = params
-        self._fingerprint = fingerprint
-        self._cache = cache
+        self._key = key
+        self._frame = frame
+        self._candidates = candidates
         self._signals = signals
 
     def run(self) -> None:  # pragma: no cover - worker thread
+        matches = []
         try:
-            result = project(
-                self._vectors,
-                self._params,
-                fingerprint=self._fingerprint,
-                cache=self._cache,
-                progress=self._signals.progress.emit,
-                on_progress=self._signals.advanced.emit,
-            )
-        except Exception as exc:  # noqa: BLE001 - surfaced in the UI
-            try:
-                self._signals.failed.emit(str(exc))
-            except RuntimeError:
-                pass
-            return
+            for candidate in self._candidates:
+                resolver = ImageResolver.detect(candidate, self._frame)
+                if resolver is not None:
+                    matches.append(resolver)
+                    if len(matches) >= 2:
+                        break
+        except Exception:  # noqa: BLE001 - a bad share must not kill the task
+            matches = []
         try:
-            self._signals.finished.emit(result)
+            self._signals.ambiguous.emit(self._key, [str(r.root) for r in matches[1:]])
+            self._signals.found.emit(self._key, matches[0] if matches else None)
         except RuntimeError:
             pass
 
@@ -200,6 +194,8 @@ class EmbeddingExplorer(QWidget):
         self._resolver_cache: dict[str, tuple[ImageResolver | None, list[str]]] = {}
         # Other roots that matched this dataset equally well, if any.
         self.ambiguous_roots: list[str] = []
+        # True while the background root hunt is running.
+        self._resolving = False
         self._windows: list[ImageWindow] = []
         self._busy = False
         self._cancelled = False
@@ -213,6 +209,10 @@ class EmbeddingExplorer(QWidget):
         self._redraw_timer.setInterval(60)
         self._redraw_timer.timeout.connect(self._redraw)
         self._pending_reset = False
+
+        self._resolve_signals = _ResolveSignals()
+        self._resolve_signals.found.connect(self._on_resolver_found)
+        self._resolve_signals.ambiguous.connect(self._on_resolver_ambiguous)
 
         search_roots = [Path(__file__).resolve().parents[2]]
         self.moa_table = load_or_empty(find_default_moa(search_roots))
@@ -589,6 +589,14 @@ class EmbeddingExplorer(QWidget):
         root = Path(chosen)
         resolver = ImageResolver.detect(root, self.frame)
         if resolver is None:
+            # A very common near-miss: picking one arm's folder when the
+            # dataset spans both, so half the rows can never resolve from
+            # there. The parent usually does, so try it before giving up.
+            parent_resolver = ImageResolver.detect(root.parent, self.frame)
+            if parent_resolver is not None:
+                resolver = parent_resolver
+                root = root.parent
+        if resolver is None:
             QMessageBox.information(
                 self,
                 "Source data",
@@ -601,6 +609,13 @@ class EmbeddingExplorer(QWidget):
 
         self.resolver = resolver
         self.ambiguous_roots = []
+        # Remember it: this is the answer for every dataset from this screen,
+        # and its parent is where the sibling screens live.
+        set_root(IMAGE_ROOT, root)
+        if get_root(DATA_LIBRARY) is None:
+            library = guess_data_library(root)
+            if library is not None:
+                set_root(DATA_LIBRARY, library)
         if self.dataset is not None:
             self._resolver_cache[str(self.dataset.directory)] = (resolver, [])
         self._update_source_label()
@@ -610,7 +625,9 @@ class EmbeddingExplorer(QWidget):
     def _update_source_label(self) -> None:
         """Say where previews come from, and whether that was a guess."""
         if self.resolver is None:
-            self.source_label.setText("not found — click Locate…")
+            self.source_label.setText(
+                "looking…" if self._resolving else "not found — click Locate…"
+            )
             self.source_label.setToolTip("")
             return
 
@@ -657,7 +674,7 @@ class EmbeddingExplorer(QWidget):
             moa_table=self.moa_table,
             pathway_table=self.pathway_table,
         )
-        self.resolver = self._resolve_images(self.frame)
+        self.resolver = self._start_resolving_images(self.frame)
         self._update_source_label()
         self.result = None
         self._rebuild_colour_options()
@@ -702,19 +719,57 @@ class EmbeddingExplorer(QWidget):
             if directory.name.lower() == "images":
                 offer(directory.parent.parent)
 
-        offer(DEFAULT_IMAGE_ROOT)
+        configured = get_root(IMAGE_ROOT)
+        if configured is not None:
+            offer(configured)
 
         # The screens themselves. Sorted newest first: a dataset being
         # explored is usually a recent one, and this is a linear scan whose
         # cost is one directory listing per candidate until a hit.
-        if DATA_LIBRARY.is_dir():
+        library = get_root(DATA_LIBRARY) or guess_data_library(configured)
+        if library is not None and library.is_dir():
             try:
-                screens = [d for d in DATA_LIBRARY.iterdir() if d.is_dir()]
+                screens = [d for d in library.iterdir() if d.is_dir()]
             except OSError:
                 screens = []
             for screen in sorted(screens, key=lambda d: d.name, reverse=True):
                 offer(screen)
         return candidates
+
+    def _start_resolving_images(self, frame) -> ImageResolver | None:
+        """Return a cached resolver, or start hunting for one in the background.
+
+        Returns immediately either way; when the hunt finishes the resolver
+        arrives on ``_on_resolver_found`` and the label updates. Until then
+        previews say they are still looking, which is honest and costs the
+        window nothing.
+        """
+        key = str(self.dataset.directory) if self.dataset is not None else ""
+        if key and key in self._resolver_cache:
+            resolver, self.ambiguous_roots = self._resolver_cache[key]
+            return resolver
+
+        self.ambiguous_roots = []
+        self._resolving = True
+        QThreadPool.globalInstance().start(
+            _ResolveTask(key, frame, self._image_root_candidates(), self._resolve_signals)
+        )
+        return None
+
+    def _on_resolver_ambiguous(self, key: str, others: list) -> None:
+        if self.dataset is not None and key == str(self.dataset.directory):
+            self.ambiguous_roots = others
+
+    def _on_resolver_found(self, key: str, resolver) -> None:
+        """The background hunt finished."""
+        if key:
+            self._resolver_cache[key] = (resolver, self.ambiguous_roots)
+        # A different dataset may have been selected while we were looking.
+        if self.dataset is None or key != str(self.dataset.directory):
+            return
+        self._resolving = False
+        self.resolver = resolver
+        self._update_source_label()
 
     def _resolve_images(self, frame) -> ImageResolver | None:
         """Find a root under which THIS dataset's rows resolve.

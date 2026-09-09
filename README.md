@@ -273,6 +273,21 @@ It reads a DINO export: a directory holding `features_all.npz` (an
 `features_metadata.csv`. Point it at a folder of such directories with
 **Browse…**; each subfolder is offered in the dropdown.
 
+**Nothing is hard-coded.** No path to your data appears anywhere in the code:
+the explorer remembers what you chose, and a lab can pin shared locations for
+everyone with environment variables.
+
+| Variable | What it points at |
+|---|---|
+| `PLATO_EMBEDDING_ROOT` | a folder of embedding exports |
+| `PLATO_DATA_ROOT` | the folder your screens live in |
+| `PLATO_IMAGE_ROOT` | one screen's images |
+
+With none of them set the explorer opens empty and asks — which is the correct
+behaviour on a machine that has never seen the data. Datasets and screens are
+matched by *content* rather than by folder name, so renaming a folder does not
+break anything.
+
 ```
 Z:\Analysis\DINO\<dataset>    features_all.npz          embeddings: (N, D) float32
     features_metadata.csv     N rows: plate, well, label, image_name, ...
@@ -457,9 +472,19 @@ lookup (~0 ms) rather than a ~33 ms decode per column.
 ## Tests
 
 ```bash
-pytest -q                                              # indexing + session layers
+pytest -q                                              # everything, on synthetic data
 QT_QPA_PLATFORM=offscreen python tests/test_gui_smoke.py /tmp/demo/plato.toml
 ```
+
+The suite needs no real data and no network share — it runs anywhere. The few
+tests that check behaviour against a real screen skip themselves unless you
+point them at one:
+
+```bash
+PLATO_TEST_EMBEDDING_ROOT=/path/to/exports PLATO_TEST_IMAGE_ROOT=/path/to/screens   pytest -q
+```
+
+Those tests find the dataset by what it contains, never by folder name.
 
 `tests/test_session.py` covers what only goes wrong once a second plate is
 loaded — plate identity, pooled contrast, and merging two sorted result sets

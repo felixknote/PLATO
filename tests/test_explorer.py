@@ -41,12 +41,29 @@ from plato.data.projection import (
     project,
 )
 
-DINO_ROOT = Path(r"Z:\Analysis\DINO")
-IMAGE_ROOT = Path(r"Z:\Data\FK_P001_EX0039_2026_08_28_CRISPRI & ABx Experiment")
+from conftest import embedding_root, find_export, image_root  # noqa: E402
 
 needs_share = pytest.mark.skipif(
-    not DINO_ROOT.is_dir(), reason="Z: embedding share not mounted"
+    embedding_root() is None,
+    reason="set PLATO_TEST_EMBEDDING_ROOT to test against real exports",
 )
+
+
+def _crispri_abx_metadata() -> pd.DataFrame:
+    """The real CRISPRi+ABx export's metadata, found by content.
+
+    Deliberately not by folder name: these directories get renamed, and a test
+    that hard-codes a name fails for a reason that has nothing to do with the
+    code under test. The dataset is identified by what it contains -- both
+    experiment arms in one export.
+    """
+    directory = find_export(
+        lambda frame: "experiment" in frame.columns
+        and {"CRISPRi", "ABx"} <= set(frame["experiment"])
+    )
+    if directory is None:
+        pytest.skip("no CRISPRi+ABx export found")
+    return pd.read_csv(directory / "features_metadata.csv", dtype=str).fillna("")
 
 
 # -- fixtures ---------------------------------------------------------------
@@ -310,7 +327,7 @@ def test_palette_detects_dose_series():
 @needs_share
 def test_real_metadata_parses_completely():
     """Every condition in the real screen must parse into gene or drug."""
-    frame = pd.read_csv(DINO_ROOT / "new 8 plates" / "features_metadata.csv", dtype=str)
+    frame = _crispri_abx_metadata()
     unparsed = [
         label
         for label in frame["label"].unique()
@@ -320,11 +337,21 @@ def test_real_metadata_parses_completely():
 
 
 @needs_share
-@pytest.mark.skipif(not IMAGE_ROOT.is_dir(), reason="image share not mounted")
 def test_real_images_resolve():
-    frame = pd.read_csv(DINO_ROOT / "new 8 plates" / "features_metadata.csv", dtype=str)
-    resolver = ImageResolver.detect(IMAGE_ROOT, frame)
-    assert resolver is not None
+    """The real export's rows resolve to real files under the real screen."""
+    root = image_root()
+    if root is None:
+        pytest.skip("set PLATO_TEST_IMAGE_ROOT to test against real images")
+    frame = _crispri_abx_metadata()
+
+    # The screen may be the configured root itself or one of its subfolders,
+    # depending on how this machine stores it.
+    candidates = [root] + [d for d in sorted(root.iterdir()) if d.is_dir()]
+    resolver = next(
+        (r for r in (ImageResolver.detect(c, frame) for c in candidates) if r), None
+    )
+    if resolver is None:
+        pytest.skip("the configured image root does not hold this export's screen")
     sample = frame.sample(n=8, random_state=0)
     assert all(resolver.path_for(row) is not None for _, row in sample.iterrows())
 
@@ -438,3 +465,28 @@ def test_projection_reports_progress():
     assert seen, "no progress was reported"
     assert seen == sorted(seen)
     assert seen[-1] == pytest.approx(1.0)
+
+
+def test_resolver_handles_split_arm_and_plate_folders(tmp_path):
+    """The same screen is organised two ways, and both must resolve.
+
+    On the share each plate is its own folder ("CRISPRi_P1/"); on a local copy
+    the arms are split and the plates sit inside them ("CRISPRi/P1/"). A
+    resolver that only understood {plate} reported the images missing when
+    they were simply one level down.
+    """
+    dataset = load_dataset(_write_dataset(tmp_path / "ds"))
+    frame, _ = build_frame(dataset)
+
+    split = tmp_path / "split"
+    for plate in ("ABx_P1", "CRISPRi_P1"):
+        arm, _, tail = plate.rpartition("_")
+        (split / arm / tail).mkdir(parents=True)
+    for _, row in frame.iterrows():
+        arm, _, tail = row["plate"].rpartition("_")
+        (split / arm / tail / f"{row['image_name']}.tiff").write_bytes(b"x")
+
+    resolver = ImageResolver.detect(split, frame)
+    assert resolver is not None
+    assert resolver.template == "{arm}/{plate_tail}/{name}"
+    assert all(resolver.path_for(row) is not None for _, row in frame.head(5).iterrows())

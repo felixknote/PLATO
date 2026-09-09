@@ -112,8 +112,25 @@ class ImageResolver:
     template: str = ""
     suffix: str = ".tiff"
 
-    # Layouts tried, in order. {plate} and {name} come from the metadata row.
-    TEMPLATES = ("{plate}/{name}", "{name}", "{plate}/images/{name}", "images/{plate}/{name}")
+    # Layouts tried, in order. Placeholders come from the metadata row:
+    #   {plate}       the plate column verbatim, e.g. "CRISPRi_P1"
+    #   {arm}         everything before the last "_", e.g. "CRISPRi"
+    #   {plate_tail}  everything after it, e.g. "P1"
+    #
+    # The arm/tail split matters because the same screen is organised two ways
+    # in practice: one folder per plate on the share ("CRISPRi_P1/"), and a
+    # folder per arm containing plates on a local copy ("CRISPRi/P1/"). A
+    # resolver that only knew {plate} found nothing in the second and told the
+    # user their images were missing when they were not.
+    TEMPLATES = (
+        "{plate}/{name}",
+        "{arm}/{plate_tail}/{name}",
+        "{plate_tail}/{name}",
+        "{name}",
+        "{plate}/images/{name}",
+        "images/{plate}/{name}",
+        "{arm}/{plate_tail}/images/{name}",
+    )
     SUFFIXES = (".tiff", ".tif", "")
 
     @classmethod
@@ -148,7 +165,16 @@ class ImageResolver:
         if not name:
             return None
         plate = str(row.get(PLATE) or "").strip()
-        relative = self.template.format(plate=plate, name=name)
+        arm, _, tail = plate.rpartition("_")
+        relative = self.template.format(
+            plate=plate,
+            name=name,
+            # With no "_" in the plate name, rpartition puts everything in the
+            # tail; falling back to the whole plate keeps {arm} meaningful
+            # rather than empty.
+            arm=arm or plate,
+            plate_tail=tail or plate,
+        )
         candidate = self.root / f"{relative}{self.suffix}"
         return candidate if candidate.exists() else None
 

@@ -7,6 +7,7 @@ be edited by changing one list.
 Colours are sampled from the original artwork.
 """
 
+import math
 from pathlib import Path
 
 # -- sampled from the artwork ------------------------------------------------
@@ -128,20 +129,76 @@ def build() -> str:
 
     # --- orbit ring
     #
-    # A narrow, steeply tilted ellipse -- the "O" of PLATO read as an orbit.
-    # In the artwork it passes BEHIND the plate on the left and in FRONT on
-    # the right, which is what gives the mark its depth. That is drawn as two
-    # arcs of the same ellipse: the back half before the plate is painted
-    # would be hidden, so instead the front half is simply drawn last, over
-    # everything, and the back half is omitted where the panel covers it.
+    # A narrow, steeply tilted ellipse -- the "O" of PLATO read as an orbit --
+    # threaded THROUGH the plate: the near half passes in front of the wells,
+    # the far half disappears behind the plate and reappears above and below
+    # it. That occlusion is the whole reason the mark reads as three
+    # dimensional rather than as a ring resting on a card. Measured off the
+    # artwork: above and below the plate the ring shows two strands, while
+    # across the plate only one is visible.
+    #
+    # The obvious implementation -- draw the ellipse twice under SVG
+    # clipPaths -- does not work here: Qt's SVG renderer ignores clipPath
+    # entirely (verified), and Qt is what renders this logo in the app. So the
+    # ellipse is walked as points and emitted as explicit polyline segments,
+    # keeping only the parts that should be visible. Every renderer
+    # understands a polyline.
     ocx, ocy = CX + 6, CY
     orx, ory = 236.0, 120.0
     angle = 62
-    add(
-        f'<ellipse cx="{ocx:.1f}" cy="{ocy:.1f}" rx="{orx:.1f}" ry="{ory:.1f}" '
-        f'fill="none" stroke="{ORBIT}" stroke-width="9" stroke-linecap="round" '
-        f'transform="rotate({angle} {ocx:.1f} {ocy:.1f})"/>'
-    )
+
+    panel_x = X0 - PAD_X
+    panel_y = Y0 - PAD_Y
+    panel_w = GRID_W + 2 * PAD_X
+    panel_h = GRID_H + 2 * PAD_Y
+
+    radians = math.radians(angle)
+    cos_a, sin_a = math.cos(radians), math.sin(radians)
+
+    def ellipse_point(t: float) -> tuple[float, float]:
+        """A point on the tilted ellipse at parameter ``t`` radians."""
+        ex, ey = orx * math.cos(t), ory * math.sin(t)
+        return (
+            ocx + ex * cos_a - ey * sin_a,
+            ocy + ex * sin_a + ey * cos_a,
+        )
+
+    def over_plate(x: float, y: float) -> bool:
+        return panel_x <= x <= panel_x + panel_w and panel_y <= y <= panel_y + panel_h
+
+    # Which half is "near" is a choice about where the ring passes in front.
+    # In the artwork the arc that sweeps down across the wells is in front and
+    # the returning arc is behind, so the near half is the half of the sweep
+    # that runs through the plate rather than around it.
+    steps = 720
+    segments: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    for i in range(steps + 1):
+        t = 2 * math.pi * i / steps
+        x, y = ellipse_point(t)
+        near = math.sin(t) < 0
+        visible = near or not over_plate(x, y)
+        if visible:
+            current.append((x, y))
+        elif current:
+            segments.append(current)
+            current = []
+    if current:
+        # The sweep starts and ends mid-arc; join the wrap-around so the ring
+        # is not broken by an artificial seam at t=0.
+        if segments and segments[0] and current[-1] == ellipse_point(2 * math.pi):
+            segments[0] = current + segments[0]
+        else:
+            segments.append(current)
+
+    for segment in segments:
+        if len(segment) < 2:
+            continue
+        points = " ".join(f"{x:.1f},{y:.1f}" for x, y in segment)
+        add(
+            f'<polyline points="{points}" fill="none" stroke="{ORBIT}" '
+            f'stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>'
+        )
 
     add("</svg>")
     return "\n".join(out)

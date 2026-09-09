@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..data.locations import EMBEDDING_ROOT, get_root
 from ..data.session import DuplicatePlateError, Session
 from ..views.browser_arm import BrowserArm
 from ..views.explorer import EmbeddingExplorer
@@ -47,9 +48,10 @@ ORGANISATION = "plato"
 BROWSER_TAB = 0
 EXPLORER_TAB = 1
 
-# Where the explorer looks for embedding exports on first open. A default, not
-# a requirement -- the Browse button accepts any folder.
-DEFAULT_EMBEDDING_ROOT = Path(r"Z:\Analysis\DINO")
+# Where the explorer looks for embedding exports is configuration, not a
+# constant -- see plato.data.locations. With nothing configured the explorer
+# opens empty and its Browse button asks, which is correct on a machine that
+# has never seen this data before.
 
 
 class MainWindow(QMainWindow):
@@ -271,8 +273,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
         self._update_title()
 
-        if DEFAULT_EMBEDDING_ROOT.is_dir():
-            self.explorer.set_dataset_root(DEFAULT_EMBEDDING_ROOT)
+        embedding_root = get_root(EMBEDDING_ROOT)
+        if embedding_root is not None:
+            self.explorer.set_dataset_root(embedding_root)
 
     def _browser_placeholder(self) -> QWidget:
         """The empty Plate Browser tab: says what is missing, and fixes it."""
