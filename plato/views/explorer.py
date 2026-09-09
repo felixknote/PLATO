@@ -90,6 +90,8 @@ from .scatter import EmbeddingScatter
 # grouping but the legend is replaced by a count.
 MAX_LEGEND_ENTRIES = 24
 
+COMPUTED_FROM_PLATES = "<loaded-plates>"
+
 # Filter lists longer than this are searchable rather than fully listed.
 MAX_FILTER_VALUES = 120
 
@@ -541,19 +543,51 @@ class EmbeddingExplorer(QWidget):
 
     # -- dataset loading --------------------------------------------------
 
-    def set_dataset_root(self, root: Path) -> None:
-        """Populate the dataset dropdown from a directory of exports."""
-        root = Path(root)
-        directories = discover_datasets(root)
+    def set_dataset_root(self, root: Path | None) -> None:
+        """Populate the dataset dropdown from a directory of exports.
+
+        The loaded plates are always offered as a dataset in their own right,
+        so the tab is usable before anybody has run an embedding export --
+        which is exactly when a new plate most wants looking at.
+        """
+        directories = discover_datasets(Path(root)) if root is not None else []
         self.dataset_box.blockSignals(True)
         self.dataset_box.clear()
         for directory in directories:
             self.dataset_box.addItem(directory.name, str(directory))
+        if getattr(self.session, "plates", []):
+            from ..data.plate_features import LOADED_PLATES
+
+            self.dataset_box.addItem(LOADED_PLATES, COMPUTED_FROM_PLATES)
         self.dataset_box.blockSignals(False)
-        if directories:
+
+        if self.dataset_box.count():
             self._on_dataset_changed()
+        elif root is None:
+            self._set_message(
+                "No embedding dataset chosen.\n\n"
+                "Use Browse… to pick a folder of exports, or load a plate in "
+                "the Plate Browser to explore its images directly."
+            )
         else:
-            self._set_message(f"No embedding datasets found under\n{root}")
+            self._set_message(
+                f"No embedding datasets found under\n{root}\n\n"
+                "Use Browse… to pick a different folder, or load a plate in "
+                "the Plate Browser to explore its images directly."
+            )
+
+    def plates_changed(self) -> None:
+        """Re-offer the computed dataset after plates are added or removed."""
+        from ..data.locations import EMBEDDING_ROOT, get_root
+
+        current = self.dataset_box.currentData()
+        self.dataset_box.blockSignals(True)
+        self.set_dataset_root(get_root(EMBEDDING_ROOT))
+        # Keep the user on whatever they were looking at, if it still exists.
+        index = self.dataset_box.findData(current)
+        if index >= 0:
+            self.dataset_box.setCurrentIndex(index)
+        self.dataset_box.blockSignals(False)
 
     def _browse_for_dataset(self) -> None:
         chosen = QFileDialog.getExistingDirectory(self, "Choose an embeddings folder")
@@ -573,42 +607,32 @@ class EmbeddingExplorer(QWidget):
         self.set_dataset_root(path)
 
     def _browse_for_source_data(self) -> None:
-        """Point this dataset at its images by hand.
+        """Point this dataset at its images, with the dialog doing the work.
 
-        Verified before it is accepted: a folder that resolves none of this
-        dataset's rows is almost always the wrong one (the parent of the plate
-        folders rather than the plate folders themselves, say), and silently
-        accepting it would leave every preview blank with no explanation.
+        The dialog indexes whatever folder is chosen and reports what it found
+        -- how many images, how many rows they cover, and which neighbouring
+        folders to try when the pick is close but wrong. The old flow was a
+        bare picker followed by "none of this dataset's images were found",
+        which said neither what it saw nor what to do next.
         """
-        chosen = QFileDialog.getExistingDirectory(
-            self, "Choose the folder holding the original images"
+        if self.frame is None:
+            return
+        from .locate_dialog import LocateDataDialog
+
+        dialog = LocateDataDialog(
+            self.frame,
+            start=self.resolver.root if self.resolver is not None else None,
+            parent=self,
         )
-        if not chosen or self.frame is None:
+        if dialog.exec() != LocateDataDialog.DialogCode.Accepted:
+            return
+        if dialog.resolver is None:
             return
 
-        root = Path(chosen)
-        resolver = ImageResolver.detect(root, self.frame)
-        if resolver is None:
-            # A very common near-miss: picking one arm's folder when the
-            # dataset spans both, so half the rows can never resolve from
-            # there. The parent usually does, so try it before giving up.
-            parent_resolver = ImageResolver.detect(root.parent, self.frame)
-            if parent_resolver is not None:
-                resolver = parent_resolver
-                root = root.parent
-        if resolver is None:
-            QMessageBox.information(
-                self,
-                "Source data",
-                f"None of this dataset's images were found under\n{root}\n\n"
-                "Expected a folder containing one subfolder per plate "
-                f"({', '.join(sorted(set(self.frame['plate']))[:3])}…), "
-                "or the image files themselves.",
-            )
-            return
-
-        self.resolver = resolver
+        self.resolver = dialog.resolver
         self.ambiguous_roots = []
+        self._resolving = False
+        root = self.resolver.root
         # Remember it: this is the answer for every dataset from this screen,
         # and its parent is where the sibling screens live.
         set_root(IMAGE_ROOT, root)
@@ -617,7 +641,7 @@ class EmbeddingExplorer(QWidget):
             if library is not None:
                 set_root(DATA_LIBRARY, library)
         if self.dataset is not None:
-            self._resolver_cache[str(self.dataset.directory)] = (resolver, [])
+            self._resolver_cache[str(self.dataset.directory)] = (self.resolver, [])
         self._update_source_label()
         self.preview.clear()
         self.status.emit(f"source data: {root}")
@@ -655,6 +679,9 @@ class EmbeddingExplorer(QWidget):
         directory = self.dataset_box.currentData()
         if not directory:
             return
+        if directory == COMPUTED_FROM_PLATES:
+            self._load_computed_dataset()
+            return
         try:
             self.dataset = load_dataset(Path(directory))
         except EmbeddingError as exc:
@@ -691,6 +718,49 @@ class EmbeddingExplorer(QWidget):
             f"{self.dataset.name}: {self.dataset.n_points:,} embeddings"
             + ("" if self.resolver else " · original images not found")
         )
+
+    def _load_computed_dataset(self) -> None:
+        """Describe the loaded plates' thumbnails and use that as the dataset."""
+        from ..data.plate_features import build
+        from ..gui.progress import run_with_progress
+
+        def job(report):
+            return build(self.session, progress=report)
+
+        dataset, error, cancelled = run_with_progress(
+            job, "Describing loaded images", self
+        )
+        if cancelled:
+            return
+        if error is not None:
+            self.dataset = None
+            self.frame = None
+            self._clear_filters()
+            self._set_message(error)
+            return
+
+        self.dataset = dataset
+        self.frame, _ = build_frame(
+            dataset, moa_table=self.moa_table, pathway_table=self.pathway_table
+        )
+        # The images are the ones already loaded, so the browser's own paths
+        # answer this without a search.
+        self.resolver = self._start_resolving_images(self.frame)
+        self._update_source_label()
+        self.result = None
+        self._rebuild_colour_options()
+        self._rebuild_filters()
+        self._update_points_hint()
+        self._set_message(
+            f"{dataset.n_points:,} images described by "
+            f"{dataset.n_dimensions} image features.\n\n"
+            "These are simple descriptors computed from the thumbnails, not "
+            "learned embeddings — good for spotting plate effects, outliers "
+            "and gross phenotypes, but not a substitute for a DINO export "
+            "when making a phenotype claim.\n\n"
+            "Choose a method and press Compute projection."
+        )
+        self.status.emit(f"{dataset.n_points:,} images described")
 
     def _image_root_candidates(self) -> list[Path]:
         """Directories that might hold this dataset's micrographs, best first.

@@ -14,13 +14,19 @@ contract.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 
 from .annotations import UNANNOTATED, AnnotationTable, parse_condition
 from .embeddings import EmbeddingDataset
+from .image_lookup import (
+    ImageIndex,
+    LookupReport,
+    hint_columns,
+    probe,
+)
 
 # Columns the explorer guarantees, whatever the source dataset looked like.
 CONDITION = "condition"
@@ -96,87 +102,59 @@ def field_label(column: str) -> str:
     return FIELD_LABELS.get(column, column.replace("_", " ").title())
 
 
-@dataclass(slots=True)
+@dataclass
 class ImageResolver:
     """Turns a metadata row into a path on disk.
 
-    The layout that holds for this screen is ``<root>/<plate>/<image_name>.tiff``
-    (verified against the real export). Rather than hard-coding that, the
-    resolver tries a short list of layouts once, on a sample of real rows, and
-    keeps whichever actually resolves -- so a differently organised dataset
-    works without a code change, and one that resolves nothing says so instead
-    of silently producing dead paths.
+    Backed by :mod:`plato.data.image_lookup`, which indexes the file names
+    actually present under a root and matches rows to them by name, using the
+    row's other columns only to break ties. That replaced a list of guessed
+    path templates keyed on fixed column names, which broke on every new
+    export: the four exports on this machine carry four different schemas
+    (``plate``, ``plate_timepoint``, ``source``, ``experiment``) and their
+    screens are arranged four different ways on disk. Nothing here assumes
+    either.
     """
 
     root: Path
-    template: str = ""
-    suffix: str = ".tiff"
-
-    # Layouts tried, in order. Placeholders come from the metadata row:
-    #   {plate}       the plate column verbatim, e.g. "CRISPRi_P1"
-    #   {arm}         everything before the last "_", e.g. "CRISPRi"
-    #   {plate_tail}  everything after it, e.g. "P1"
-    #
-    # The arm/tail split matters because the same screen is organised two ways
-    # in practice: one folder per plate on the share ("CRISPRi_P1/"), and a
-    # folder per arm containing plates on a local copy ("CRISPRi/P1/"). A
-    # resolver that only knew {plate} found nothing in the second and told the
-    # user their images were missing when they were not.
-    TEMPLATES = (
-        "{plate}/{name}",
-        "{arm}/{plate_tail}/{name}",
-        "{plate_tail}/{name}",
-        "{name}",
-        "{plate}/images/{name}",
-        "images/{plate}/{name}",
-        "{arm}/{plate_tail}/images/{name}",
-    )
-    SUFFIXES = (".tiff", ".tif", "")
+    index: ImageIndex
+    name_column: str = IMAGE_NAME
+    hints: list[str] = field(default_factory=list)
+    report: LookupReport | None = None
 
     @classmethod
-    def detect(cls, root: Path, frame: pd.DataFrame, *, samples: int = 12) -> ImageResolver | None:
-        """Find the layout that resolves the most sampled rows, or None."""
+    def detect(
+        cls, root: Path, frame: pd.DataFrame, *, samples: int = 24
+    ) -> ImageResolver | None:
+        """Index ``root`` and keep it if it resolves any of ``frame``'s rows."""
+        resolver = cls.for_root(root, frame, samples=samples)
+        return resolver if resolver.report and resolver.report.ok else None
+
+    @classmethod
+    def for_root(
+        cls, root: Path, frame: pd.DataFrame, *, samples: int = 24
+    ) -> ImageResolver:
+        """Index ``root`` and report how well it matches, match or not.
+
+        Unlike :meth:`detect` this always returns a resolver, so a caller can
+        explain *why* a folder did not work instead of only that it did not.
+        """
         root = Path(root)
-        if not root.is_dir() or frame.empty or IMAGE_NAME not in frame.columns:
-            return None
-        probe = frame.head(samples * 40).sample(
-            n=min(samples, len(frame)), random_state=0
+        if frame is None or frame.empty or IMAGE_NAME not in frame.columns:
+            return cls(root=root, index=ImageIndex(root=root))
+        index = ImageIndex.build(root)
+        hints = hint_columns(frame, exclude=(IMAGE_NAME,))
+        report = probe(
+            index, frame, name_column=IMAGE_NAME, hints=hints, samples=samples
         )
-        best: tuple[int, str, str] | None = None
-        for template in cls.TEMPLATES:
-            for suffix in cls.SUFFIXES:
-                resolver = cls(root=root, template=template, suffix=suffix)
-                hits = sum(
-                    1
-                    for _, row in probe.iterrows()
-                    if resolver.path_for(row) is not None
-                )
-                if hits and (best is None or hits > best[0]):
-                    best = (hits, template, suffix)
-                if best is not None and best[0] == len(probe):
-                    break
-        if best is None:
-            return None
-        return cls(root=root, template=best[1], suffix=best[2])
+        return cls(root=root, index=index, hints=hints, report=report)
 
     def path_for(self, row) -> Path | None:
-        """The image for one row, or None if it is not on disk."""
-        name = str(row.get(IMAGE_NAME) or "").strip()
-        if not name:
+        """The image for one row, or None if it is not under this root."""
+        stem = str(row.get(self.name_column) or "").strip()
+        if not stem:
             return None
-        plate = str(row.get(PLATE) or "").strip()
-        arm, _, tail = plate.rpartition("_")
-        relative = self.template.format(
-            plate=plate,
-            name=name,
-            # With no "_" in the plate name, rpartition puts everything in the
-            # tail; falling back to the whole plate keeps {arm} meaningful
-            # rather than empty.
-            arm=arm or plate,
-            plate_tail=tail or plate,
-        )
-        candidate = self.root / f"{relative}{self.suffix}"
-        return candidate if candidate.exists() else None
+        return self.index.resolve(stem, [str(row.get(c, "")) for c in self.hints])
 
 
 def _first_present(frame: pd.DataFrame, names) -> str | None:

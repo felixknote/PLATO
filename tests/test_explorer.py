@@ -234,7 +234,7 @@ def test_build_frame_resolves_fields(dataset_dir):
     assert distinct_values(frame, "concentration") == ["1x", "2x"]
 
 
-def test_image_resolver_detects_layout(tmp_path):
+def test_image_resolver_finds_files_in_a_plate_layout(tmp_path):
     root = tmp_path / "images"
     (root / "ABx_P1").mkdir(parents=True)
     for i in range(0, 120, 2):
@@ -242,14 +242,92 @@ def test_image_resolver_detects_layout(tmp_path):
     directory = _write_dataset(tmp_path / "ds")
     dataset = load_dataset(directory)
     frame, _ = build_frame(dataset)
-    resolver = ImageResolver.detect(root, frame[frame["plate"] == "ABx_P1"])
+    abx = frame[frame["plate"] == "ABx_P1"]
+
+    resolver = ImageResolver.detect(root, abx)
     assert resolver is not None
-    assert resolver.template == "{plate}/{name}"
-    row = frame[frame["plate"] == "ABx_P1"].iloc[0]
-    assert resolver.path_for(row) is not None
+    assert resolver.path_for(abx.iloc[0]) is not None
     # A row whose file is absent resolves to None rather than a dead path.
     missing = frame[frame["plate"] == "CRISPRi_P1"].iloc[0]
     assert resolver.path_for(missing) is None
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "{plate}",                      # CRISPRi_P1/file.tiff
+        "{arm}/{tail}",                 # CRISPRi/P1/file.tiff
+        "{plate}/images",               # CRISPRi_P1/images/file.tiff
+        "",                             # everything in one folder
+    ],
+)
+def test_image_resolver_is_layout_agnostic(tmp_path, layout):
+    """Folder arrangement must not matter.
+
+    The same screen is stored differently on every machine -- one folder per
+    plate, arms split into subfolders, a flat dump. Matching on file name
+    rather than on a guessed path template makes all of them work.
+    """
+    dataset = load_dataset(_write_dataset(tmp_path / "ds"))
+    frame, _ = build_frame(dataset)
+
+    root = tmp_path / "images"
+    for _, row in frame.iterrows():
+        arm, _, tail = row["plate"].rpartition("_")
+        relative = layout.format(plate=row["plate"], arm=arm, tail=tail)
+        directory = root / relative if relative else root
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{row['image_name']}.tiff").write_bytes(b"x")
+
+    resolver = ImageResolver.detect(root, frame)
+    assert resolver is not None, f"layout {layout!r} not resolved"
+    assert all(
+        resolver.path_for(row) is not None for _, row in frame.head(6).iterrows()
+    )
+
+
+def test_resolver_disambiguates_repeated_file_names(tmp_path):
+    """The same file name under many plate folders must still resolve.
+
+    Every plate of a timepoint screen contains WellA01_...Seq0000.tiff, so the
+    name alone is ambiguous and the row's other columns have to decide.
+    """
+    dataset = load_dataset(_write_dataset(tmp_path / "ds"))
+    frame, _ = build_frame(dataset)
+    # Give every row the SAME file name, so only the folder distinguishes them.
+    frame = frame.copy()
+    frame["image_name"] = "WellA01_PointA01_0000"
+
+    root = tmp_path / "images"
+    for plate in sorted(set(frame["plate"])):
+        (root / plate).mkdir(parents=True)
+        (root / plate / "WellA01_PointA01_0000.tiff").write_bytes(b"x")
+
+    resolver = ImageResolver.detect(root, frame)
+    assert resolver is not None
+    for _, row in frame.head(8).iterrows():
+        path = resolver.path_for(row)
+        assert path is not None
+        # It must pick the folder matching THIS row's plate.
+        assert row["plate"] in path.parts
+
+
+def test_resolver_refuses_a_coincidental_name_match(tmp_path):
+    """A name that matches but whose metadata matches nothing is not a hit."""
+    dataset = load_dataset(_write_dataset(tmp_path / "ds"))
+    frame, _ = build_frame(dataset)
+    frame = frame.copy()
+    frame["image_name"] = "WellA01_PointA01_0000"
+
+    root = tmp_path / "images"
+    for unrelated in ("SomeOtherScreen_P9", "AndAnother_P8"):
+        (root / unrelated).mkdir(parents=True)
+        (root / unrelated / "WellA01_PointA01_0000.tiff").write_bytes(b"x")
+
+    resolver = ImageResolver.for_root(root, frame)
+    # Files are there and the names match, but nothing about the rows does.
+    assert resolver.index.n_files == 2
+    assert resolver.report is not None and not resolver.report.ok
 
 
 # -- projection -------------------------------------------------------------
@@ -467,26 +545,83 @@ def test_projection_reports_progress():
     assert seen[-1] == pytest.approx(1.0)
 
 
-def test_resolver_handles_split_arm_and_plate_folders(tmp_path):
-    """The same screen is organised two ways, and both must resolve.
+def test_missing_backend_says_what_to_install(monkeypatch):
+    """The explorer's libraries are an optional extra, so a missing one must
+    name the install command rather than surfacing "No module named 'umap'"."""
+    import builtins
 
-    On the share each plate is its own folder ("CRISPRi_P1/"); on a local copy
-    the arms are split and the plates sit inside them ("CRISPRi/P1/"). A
-    resolver that only understood {plate} reported the images missing when
-    they were simply one level down.
-    """
-    dataset = load_dataset(_write_dataset(tmp_path / "ds"))
-    frame, _ = build_frame(dataset)
+    from plato.data.projection import MissingDependency
 
-    split = tmp_path / "split"
-    for plate in ("ABx_P1", "CRISPRi_P1"):
-        arm, _, tail = plate.rpartition("_")
-        (split / arm / tail).mkdir(parents=True)
-    for _, row in frame.iterrows():
-        arm, _, tail = row["plate"].rpartition("_")
-        (split / arm / tail / f"{row['image_name']}.tiff").write_bytes(b"x")
+    real_import = builtins.__import__
 
-    resolver = ImageResolver.detect(split, frame)
-    assert resolver is not None
-    assert resolver.template == "{arm}/{plate_tail}/{name}"
-    assert all(resolver.path_for(row) is not None for _, row in frame.head(5).iterrows())
+    def blocked(name, *args, **kwargs):
+        if name.split(".")[0] in {"umap", "openTSNE", "sklearn"}:
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(MissingDependency) as excinfo:
+        project(
+            np.random.default_rng(0).normal(size=(40, 8)).astype(np.float32),
+            ProjectionParams(n_neighbors=5, pca_components=4),
+        )
+    assert "pip install" in str(excinfo.value)
+
+
+# -- progress reporting -----------------------------------------------------
+
+
+def test_umap_progress_parser_is_monotonic():
+    """Phases and epochs both advance the bar, and it never goes backwards."""
+    from plato.data.progress_taps import UmapProgressParser
+
+    seen = []
+    parser = UmapProgressParser(lambda f, m: seen.append((f, m)))
+    parser.feed("Wed Sep 9 2026 Finding Nearest Neighbors\n")
+    parser.feed("Epochs completed:  50%| ##  250/500 [00:01]\n")
+    # tqdm rewrites its line; an older value must not rewind the bar.
+    parser.feed("Epochs completed:  10%| #    50/500 [00:00]\n")
+    parser.feed("Wed Sep 9 2026 Finished embedding\n")
+
+    fractions = [f for f, _ in seen]
+    assert fractions == sorted(fractions)
+    assert fractions[-1] == 1.0
+    assert all(0.0 <= f <= 1.0 for f in fractions)
+
+
+def test_umap_progress_parser_ignores_noise():
+    """An unrecognised line advances nothing rather than raising."""
+    from plato.data.progress_taps import UmapProgressParser
+
+    seen = []
+    parser = UmapProgressParser(lambda f, m: seen.append(f))
+    parser.feed("something entirely unexpected\n\n")
+    assert seen == []
+
+
+def test_tsne_callback_survives_the_second_pass():
+    """openTSNE restarts its counter for the main pass; the bar must not."""
+    from plato.data.progress_taps import tsne_callback
+
+    seen = []
+    callback = tsne_callback(lambda f, m: seen.append(f), 250, offset=0.35, span=0.65)
+    for iteration in (50, 150, 250):  # early exaggeration
+        callback(iteration, 1.0, None)
+    for iteration in (50, 150, 250):  # main pass, counter restarts
+        callback(iteration, 1.0, None)
+
+    assert seen == sorted(seen), "progress went backwards between passes"
+    assert seen[-1] <= 1.0
+
+
+def test_projection_reports_progress():
+    """A real fit drives the fraction callback from start to finish."""
+    seen = []
+    project(
+        np.random.default_rng(0).normal(size=(200, 12)).astype(np.float32),
+        ProjectionParams(method=UMAP, n_neighbors=10, pca_components=6),
+        on_progress=lambda f, m: seen.append(f),
+    )
+    assert seen, "no progress was reported"
+    assert seen == sorted(seen)
+    assert seen[-1] == pytest.approx(1.0)

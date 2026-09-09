@@ -195,6 +195,10 @@ class MainWindow(QMainWindow):
         """
         if self.browser is not None:
             self.browser.plates_changed()
+        # Loading a plate adds (or removes) the computed dataset the explorer
+        # offers, so its dropdown is stale until it is rebuilt.
+        if self.explorer is not None:
+            self.explorer.plates_changed()
         self._update_title()
 
     def _update_title(self) -> None:
@@ -273,9 +277,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
         self._update_title()
 
-        embedding_root = get_root(EMBEDDING_ROOT)
-        if embedding_root is not None:
-            self.explorer.set_dataset_root(embedding_root)
+        # Called even with nothing configured: the explorer still offers the
+        # loaded plates as a dataset, so the tab works before any embedding
+        # export exists.
+        self.explorer.set_dataset_root(get_root(EMBEDDING_ROOT))
 
     def _browser_placeholder(self) -> QWidget:
         """The empty Plate Browser tab: says what is missing, and fixes it."""
