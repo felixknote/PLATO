@@ -100,12 +100,55 @@ MAX_LEGEND_ENTRIES = 24
 
 COMPUTED_FROM_PLATES = "<loaded-plates>"
 
+# Subsample choices, as a share of the dataset.
+FULL_SAMPLE = "100% (all)"
+SUBSAMPLE_CHOICES = (FULL_SAMPLE, "50%", "25%", "10%", "5%", "1%")
+
+
+def _percent_of(text: str) -> float | None:
+    """The fraction a subsample choice stands for, or None for all of it."""
+    cleaned = text.strip().rstrip("%").split(" ")[0]
+    try:
+        value = float(cleaned)
+    except ValueError:
+        return None
+    return None if value >= 100 else max(0.01, value) / 100.0
+
+
+def _cap_for(text: str, n_points: int) -> int | None:
+    """``max_points`` for a choice, or None to project everything."""
+    fraction = _percent_of(text)
+    if fraction is None:
+        return None
+    # At least a handful of points, or the projection has nothing to lay out
+    # -- but never more than exist, which matters for a tiny dataset where the
+    # floor would otherwise exceed the whole thing.
+    return min(n_points, max(10, int(round(n_points * fraction))))
+
+
+def _choice_for(max_points: int | None, n_points: int) -> str:
+    """The nearest offered choice to a stored ``max_points``."""
+    if max_points is None or n_points <= 0 or max_points >= n_points:
+        return FULL_SAMPLE
+    wanted = max_points / n_points * 100
+    offered = [c for c in SUBSAMPLE_CHOICES if _percent_of(c) is not None]
+    return min(offered, key=lambda c: abs((_percent_of(c) or 1) * 100 - wanted))
+
 # Filter lists longer than this are searchable rather than fully listed.
 MAX_FILTER_VALUES = 120
 
 # Where the original micrographs live is configuration, not a constant: every
 # installation keeps them somewhere different, and a baked-in drive letter
 # works on exactly one machine. See plato.data.locations.
+
+
+class _WarmUpTask(QRunnable):
+    """Compiles the projection backend's kernels off the GUI thread."""
+
+    def run(self) -> None:  # pragma: no cover - worker thread
+        from ..data.projection import warm_up
+
+        warm_up()
 
 
 class _ResolveSignals(QObject):
@@ -232,6 +275,10 @@ class EmbeddingExplorer(QWidget):
 
         self._build_ui()
 
+        # Compile UMAP's numba kernels now, on a worker, so the first real
+        # projection is not also paying for the compiler.
+        QThreadPool.globalInstance().start(_WarmUpTask())
+
     # -- construction -----------------------------------------------------
 
     def _build_ui(self) -> None:
@@ -313,15 +360,17 @@ class EmbeddingExplorer(QWidget):
         # same question far faster. It is a property of the projection, so it
         # is part of the cache key -- a 5k run and a full run are two separate
         # cached results, not one overwriting the other.
+        # A share of the dataset, not a count. Datasets here run from a few
+        # hundred computed descriptors to 36k embeddings, and "10000" means
+        # "all of it" for one and "a third" for another; a percentage means
+        # the same thing to both.
         self.max_points_box = QComboBox()
-        self.max_points_box.addItems(
-            ["all", "2000", "5000", "10000", "20000", "50000"]
-        )
-        self.max_points_box.setCurrentText("all")
+        self.max_points_box.addItems(SUBSAMPLE_CHOICES)
+        self.max_points_box.setCurrentText(FULL_SAMPLE)
         self.max_points_box.setToolTip(
-            "Project a random subsample instead of every point.\n"
+            "Project a share of the points instead of all of them.\n"
             "Sampling is seeded, so the same setting always draws the same "
-            "points, and each size is cached separately."
+            "points, and each share is cached separately."
         )
         self.max_points_box.currentTextChanged.connect(self._update_points_hint)
 
@@ -558,20 +607,16 @@ class EmbeddingExplorer(QWidget):
         self._set_message("Choose an embedding dataset to begin.")
 
     def _update_points_hint(self, *_args) -> None:
-        """Say what the current subsample setting means for this dataset."""
+        """Spell the percentage out as a count, which is what costs the time."""
         if self.dataset is None:
             self.points_hint.setText("")
             return
         total = self.dataset.n_points
-        text = self.max_points_box.currentText()
-        if text == "all":
+        cap = _cap_for(self.max_points_box.currentText(), total)
+        if cap is None or cap >= total:
             self.points_hint.setText(f"all {total:,} points")
-            return
-        wanted = int(text)
-        if wanted >= total:
-            self.points_hint.setText(f"all {total:,} points (fewer than {wanted:,})")
         else:
-            self.points_hint.setText(f"{wanted:,} of {total:,} points")
+            self.points_hint.setText(f"{cap:,} of {total:,} points")
 
     def _sync_method_options(self) -> None:
         is_umap = self.method_box.currentText() == UMAP
@@ -1035,7 +1080,7 @@ class EmbeddingExplorer(QWidget):
 
         self.max_points_box.blockSignals(True)
         self.max_points_box.setCurrentText(
-            "all" if params.max_points is None else str(params.max_points)
+            _choice_for(params.max_points, self.dataset.n_points)
         )
         self.max_points_box.blockSignals(False)
         self._update_points_hint()
@@ -1106,11 +1151,8 @@ class EmbeddingExplorer(QWidget):
                 # An editable combo can hold anything the user typed.
                 return fallback
 
-        text = self.max_points_box.currentText().strip()
-        try:
-            max_points = None if text == "all" else int(text)
-        except ValueError:
-            max_points = base.max_points
+        total = self.dataset.n_points if self.dataset is not None else 0
+        max_points = _cap_for(self.max_points_box.currentText(), total)
 
         return ProjectionParams(
             method=self.method_box.currentText(),
