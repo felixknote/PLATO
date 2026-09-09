@@ -132,39 +132,63 @@ def _subsample(n_rows: int, params: ProjectionParams) -> np.ndarray:
     return np.sort(rng.choice(n_rows, size=params.max_points, replace=False))
 
 
-def _run_umap(data: np.ndarray, params: ProjectionParams) -> np.ndarray:
+def _run_umap(data: np.ndarray, params: ProjectionParams, progress=None) -> np.ndarray:
     try:
         import umap
     except ImportError as exc:  # pragma: no cover - depends on the install
         raise MissingDependency("umap-learn") from exc
 
+    from .progress_taps import UmapProgressTap
+
     # n_neighbors must stay below the sample count; the tuned default of 500
     # is larger than some datasets are.
     n_neighbors = int(max(2, min(params.n_neighbors, data.shape[0] - 1)))
+
+    # UMAP has no progress callback, but it will narrate its phases and its
+    # optimiser's epochs; the tap turns that into fractions. Without a
+    # reporter it stays silent, exactly as before.
+    tap = UmapProgressTap(progress) if progress is not None else None
     reducer = umap.UMAP(
         n_components=2,
         n_neighbors=n_neighbors,
         min_dist=params.min_dist,
         metric=params.metric,
         random_state=RANDOM_STATE,
+        verbose=tap is not None,
+        tqdm_kwds=tap.tqdm_kwds if tap is not None else None,
     )
-    return np.asarray(reducer.fit_transform(data), dtype=np.float32)
+    if tap is None:
+        return np.asarray(reducer.fit_transform(data), dtype=np.float32)
+    with tap.capture():
+        return np.asarray(reducer.fit_transform(data), dtype=np.float32)
 
 
-def _run_tsne(data: np.ndarray, params: ProjectionParams) -> np.ndarray:
+def _run_tsne(data: np.ndarray, params: ProjectionParams, progress=None) -> np.ndarray:
     try:
         from openTSNE import TSNE
     except ImportError as exc:  # pragma: no cover - depends on the install
         raise MissingDependency("openTSNE") from exc
 
+    from .progress_taps import tsne_callback
+
     # openTSNE requires perplexity < n_samples / 3.
     perplexity = float(max(5.0, min(params.perplexity, (data.shape[0] - 1) / 3.0)))
+    n_iter = 500
+
+    # Unlike UMAP, openTSNE takes a real callback. The neighbour search before
+    # optimisation reports nothing, so it owns the first third of the bar and
+    # the callback fills the rest.
+    if progress is not None:
+        progress(0.05, "finding nearest neighbours")
     tsne = TSNE(
         n_components=2,
         perplexity=perplexity,
         metric=params.metric,
         random_state=RANDOM_STATE,
         n_jobs=-1,
+        n_iter=n_iter,
+        callbacks=tsne_callback(progress, n_iter, offset=0.35, span=0.65),
+        callbacks_every_iters=25,
     )
     return np.asarray(tsne.fit(data), dtype=np.float32)
 
@@ -240,11 +264,13 @@ def project(
     fingerprint: str = "",
     cache: ProjectionCache | None = None,
     progress=None,
+    on_progress=None,
 ) -> ProjectionResult:
     """Project ``vectors`` to 2-D, reusing a cached result when one exists.
 
-    ``progress`` is an optional callable taking a status string; it is the only
-    feedback available during a multi-minute fit.
+    ``progress`` is an optional callable taking a status string.
+    ``on_progress`` is an optional ``callable(fraction, message)`` driven by
+    the backend's own reporting, for a determinate progress bar.
     """
     import time
 
@@ -267,10 +293,18 @@ def project(
 
     if progress:
         progress(f"running {params.method} on {data.shape[0]:,} x {data.shape[1]}…")
+
+    # The libraries report a fraction and a phase; `on_progress` receives both,
+    # while `progress` stays the plain status-text callback it always was.
+    reporter = None
+    if on_progress is not None:
+        def reporter(fraction: float, message: str) -> None:  # noqa: ANN202
+            on_progress(fraction, message)
+
     if params.method == UMAP:
-        coords = _run_umap(data, params)
+        coords = _run_umap(data, params, reporter)
     elif params.method == TSNE:
-        coords = _run_tsne(data, params)
+        coords = _run_tsne(data, params, reporter)
     else:
         raise ValueError(f"unknown projection method: {params.method}")
 

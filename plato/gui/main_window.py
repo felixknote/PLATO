@@ -252,11 +252,11 @@ class MainWindow(QMainWindow):
         else:
             # A placeholder keeps the explorer at a stable tab index whether or
             # not images are loaded, so the menu and shortcuts do not have to
-            # care which case they are in.
-            placeholder = QLabel("Load a plate to browse images.")
-            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            placeholder.setStyleSheet(f"color: {TEXT_FAINT};")
-            self.tabs.addTab(placeholder, "Plate Browser")
+            # care which case they are in. It carries the Load button itself:
+            # a tab that only says "load a plate" is a dead end, since the
+            # menu is the one place a user looking at this screen is not
+            # looking.
+            self.tabs.addTab(self._browser_placeholder(), "Plate Browser")
 
         work_dir = (
             self.session.plates[0].cfg.project.work_dir
@@ -273,6 +273,33 @@ class MainWindow(QMainWindow):
 
         if DEFAULT_EMBEDDING_ROOT.is_dir():
             self.explorer.set_dataset_root(DEFAULT_EMBEDDING_ROOT)
+
+    def _browser_placeholder(self) -> QWidget:
+        """The empty Plate Browser tab: says what is missing, and fixes it."""
+        message = QLabel("No plates loaded")
+        message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        message.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px;")
+
+        hint = QLabel("Choose an image folder and a plate map to browse images.")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 12px;")
+
+        button = QPushButton("Load Data")
+        button.setFixedWidth(200)
+        button.clicked.connect(self._load_data)
+
+        layout = QVBoxLayout()
+        layout.setSpacing(10)
+        layout.addStretch(1)
+        layout.addWidget(message, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hint, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(10)
+        layout.addWidget(button, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+
+        container = QWidget()
+        container.setLayout(layout)
+        return container
 
     def _on_tab_changed(self, index: int) -> None:
         """Only the browser wants the grid's single-key shortcuts.

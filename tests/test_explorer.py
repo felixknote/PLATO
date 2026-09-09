@@ -379,3 +379,62 @@ def test_missing_backend_says_what_to_install(monkeypatch):
             ProjectionParams(n_neighbors=5, pca_components=4),
         )
     assert "pip install" in str(excinfo.value)
+
+
+# -- progress reporting -----------------------------------------------------
+
+
+def test_umap_progress_parser_is_monotonic():
+    """Phases and epochs both advance the bar, and it never goes backwards."""
+    from plato.data.progress_taps import UmapProgressParser
+
+    seen = []
+    parser = UmapProgressParser(lambda f, m: seen.append((f, m)))
+    parser.feed("Wed Sep 9 2026 Finding Nearest Neighbors\n")
+    parser.feed("Epochs completed:  50%| ##  250/500 [00:01]\n")
+    # tqdm rewrites its line; an older value must not rewind the bar.
+    parser.feed("Epochs completed:  10%| #    50/500 [00:00]\n")
+    parser.feed("Wed Sep 9 2026 Finished embedding\n")
+
+    fractions = [f for f, _ in seen]
+    assert fractions == sorted(fractions)
+    assert fractions[-1] == 1.0
+    assert all(0.0 <= f <= 1.0 for f in fractions)
+
+
+def test_umap_progress_parser_ignores_noise():
+    """An unrecognised line advances nothing rather than raising."""
+    from plato.data.progress_taps import UmapProgressParser
+
+    seen = []
+    parser = UmapProgressParser(lambda f, m: seen.append(f))
+    parser.feed("something entirely unexpected\n\n")
+    assert seen == []
+
+
+def test_tsne_callback_survives_the_second_pass():
+    """openTSNE restarts its counter for the main pass; the bar must not."""
+    from plato.data.progress_taps import tsne_callback
+
+    seen = []
+    callback = tsne_callback(lambda f, m: seen.append(f), 250, offset=0.35, span=0.65)
+    for iteration in (50, 150, 250):  # early exaggeration
+        callback(iteration, 1.0, None)
+    for iteration in (50, 150, 250):  # main pass, counter restarts
+        callback(iteration, 1.0, None)
+
+    assert seen == sorted(seen), "progress went backwards between passes"
+    assert seen[-1] <= 1.0
+
+
+def test_projection_reports_progress():
+    """A real fit drives the fraction callback from start to finish."""
+    seen = []
+    project(
+        np.random.default_rng(0).normal(size=(200, 12)).astype(np.float32),
+        ProjectionParams(method=UMAP, n_neighbors=10, pca_components=6),
+        on_progress=lambda f, m: seen.append(f),
+    )
+    assert seen, "no progress was reported"
+    assert seen == sorted(seen)
+    assert seen[-1] == pytest.approx(1.0)

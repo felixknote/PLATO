@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -95,11 +96,18 @@ DEFAULT_IMAGE_ROOT = Path(
     )
 )
 
+# The library every screen lives under. Each DINO export was extracted
+# from a different one, so the right image root is dataset-specific and
+# has to be discovered rather than configured once.
+DATA_LIBRARY = Path(os.environ.get("PLATO_DATA_ROOT", r"Z:\Data"))
+
 
 class _WorkerSignals(QObject):
     finished = Signal(object)
     failed = Signal(str)
     progress = Signal(str)
+    # (fraction 0..1, phase) from the backend's own reporting.
+    advanced = Signal(float, str)
 
 
 class _ProjectionTask(QRunnable):
@@ -121,6 +129,7 @@ class _ProjectionTask(QRunnable):
                 fingerprint=self._fingerprint,
                 cache=self._cache,
                 progress=self._signals.progress.emit,
+                on_progress=self._signals.advanced.emit,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced in the UI
             try:
@@ -185,8 +194,14 @@ class EmbeddingExplorer(QWidget):
         self.resolver: ImageResolver | None = None
         self.result = None
         self._visible_rows = np.empty(0, dtype=np.int64)
+        # dataset directory -> resolver (or None). Scanning the data
+        # library is a directory walk; do it once per dataset.
+        self._resolver_cache: dict[str, tuple[ImageResolver | None, list[str]]] = {}
+        # Other roots that matched this dataset equally well, if any.
+        self.ambiguous_roots: list[str] = []
         self._windows: list[ImageWindow] = []
         self._busy = False
+        self._cancelled = False
 
         # Redraws are coalesced. Dragging a slider emits a value per pixel of
         # travel, and a full regroup + repaint of 32k points per tick turns a
@@ -220,6 +235,7 @@ class EmbeddingExplorer(QWidget):
         self.dataset_box.currentIndexChanged.connect(self._on_dataset_changed)
 
         browse = QPushButton("Browse…")
+        browse.setToolTip("Choose a folder of embedding exports.")
         browse.clicked.connect(self._browse_for_dataset)
 
         # Stacked, not side by side: the two together are the widest row in
@@ -233,6 +249,30 @@ class EmbeddingExplorer(QWidget):
         source_widget = QWidget()
         source_widget.setLayout(source_row)
 
+        # Every export came from a different screen, so the images are found
+        # by search -- and a search can miss (a screen on another drive, a
+        # renamed folder). This is the manual answer, and the label says
+        # whether the automatic one worked.
+        self.source_button = QPushButton("Locate…")
+        self.source_button.setToolTip(
+            "Choose the folder holding this dataset's original images.\n"
+            "PLATO searches for it automatically; use this when it cannot "
+            "find them, or to point at a different copy."
+        )
+        self.source_button.clicked.connect(self._browse_for_source_data)
+
+        self.source_label = QLabel("—")
+        self.source_label.setWordWrap(True)
+        self.source_label.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 10px;")
+
+        source_data_row = QVBoxLayout()
+        source_data_row.setContentsMargins(0, 0, 0, 0)
+        source_data_row.setSpacing(4)
+        source_data_row.addWidget(self.source_button)
+        source_data_row.addWidget(self.source_label)
+        source_data_widget = QWidget()
+        source_data_widget.setLayout(source_data_row)
+
         self.method_box = QComboBox()
         self.method_box.addItems(METHODS)
 
@@ -244,21 +284,67 @@ class EmbeddingExplorer(QWidget):
         self.perplexity_box.addItems(["10", "30", "50", "100"])
         self.perplexity_box.setCurrentText("30")
 
+        # Subsampling. A UMAP of 30k x 1024 is minutes; 5k is seconds, and for
+        # judging whether two conditions overlap a random subsample answers the
+        # same question far faster. It is a property of the projection, so it
+        # is part of the cache key -- a 5k run and a full run are two separate
+        # cached results, not one overwriting the other.
         self.max_points_box = QComboBox()
-        self.max_points_box.addItems(["all", "5000", "10000", "20000"])
+        self.max_points_box.addItems(
+            ["all", "2000", "5000", "10000", "20000", "50000"]
+        )
+        self.max_points_box.setCurrentText("all")
+        self.max_points_box.setToolTip(
+            "Project a random subsample instead of every point.\n"
+            "Sampling is seeded, so the same setting always draws the same "
+            "points, and each size is cached separately."
+        )
+        self.max_points_box.currentTextChanged.connect(self._update_points_hint)
+
+        self.points_hint = QLabel("")
+        self.points_hint.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 10px;")
 
         self.run_button = QPushButton("Compute projection")
         self.run_button.setDefault(True)
         self.run_button.clicked.connect(self.compute)
 
+        # A determinate bar: UMAP and t-SNE both report their phases and their
+        # optimiser's iterations, so this shows real progress rather than a
+        # barber's pole. Hidden until a run starts.
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(6)
+        self.progress_bar.hide()
+
+        self.progress_label = QLabel("")
+        self.progress_label.setWordWrap(True)
+        self.progress_label.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 10px;")
+        self.progress_label.hide()
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self._cancel_projection)
+        self.cancel_button.hide()
+
         projection_form = QFormLayout()
         projection_form.setContentsMargins(6, 4, 6, 4)
         projection_form.addRow("Dataset", source_widget)
+        projection_form.addRow("Source data", source_data_widget)
         projection_form.addRow("Method", self.method_box)
         projection_form.addRow("Neighbours", self.neighbours_box)
         projection_form.addRow("Perplexity", self.perplexity_box)
-        projection_form.addRow("Points", self.max_points_box)
+        points_column = QVBoxLayout()
+        points_column.setContentsMargins(0, 0, 0, 0)
+        points_column.setSpacing(4)
+        points_column.addWidget(self.max_points_box)
+        points_column.addWidget(self.points_hint)
+        points_widget = QWidget()
+        points_widget.setLayout(points_column)
+        projection_form.addRow("Subsample", points_widget)
         projection_form.addRow(self.run_button)
+        projection_form.addRow(self.progress_bar)
+        projection_form.addRow(self.progress_label)
+        projection_form.addRow(self.cancel_button)
         projection_group = QGroupBox("Projection")
         projection_group.setLayout(projection_form)
         self.method_box.currentTextChanged.connect(self._sync_method_options)
@@ -403,6 +489,22 @@ class EmbeddingExplorer(QWidget):
         self._sync_method_options()
         self._set_message("Choose an embedding dataset to begin.")
 
+    def _update_points_hint(self, *_args) -> None:
+        """Say what the current subsample setting means for this dataset."""
+        if self.dataset is None:
+            self.points_hint.setText("")
+            return
+        total = self.dataset.n_points
+        text = self.max_points_box.currentText()
+        if text == "all":
+            self.points_hint.setText(f"all {total:,} points")
+            return
+        wanted = int(text)
+        if wanted >= total:
+            self.points_hint.setText(f"all {total:,} points (fewer than {wanted:,})")
+        else:
+            self.points_hint.setText(f"{wanted:,} of {total:,} points")
+
     def _sync_method_options(self) -> None:
         is_umap = self.method_box.currentText() == UMAP
         self.neighbours_box.setEnabled(is_umap)
@@ -446,6 +548,68 @@ class EmbeddingExplorer(QWidget):
             return
         self.set_dataset_root(path)
 
+    def _browse_for_source_data(self) -> None:
+        """Point this dataset at its images by hand.
+
+        Verified before it is accepted: a folder that resolves none of this
+        dataset's rows is almost always the wrong one (the parent of the plate
+        folders rather than the plate folders themselves, say), and silently
+        accepting it would leave every preview blank with no explanation.
+        """
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose the folder holding the original images"
+        )
+        if not chosen or self.frame is None:
+            return
+
+        root = Path(chosen)
+        resolver = ImageResolver.detect(root, self.frame)
+        if resolver is None:
+            QMessageBox.information(
+                self,
+                "Source data",
+                f"None of this dataset's images were found under\n{root}\n\n"
+                "Expected a folder containing one subfolder per plate "
+                f"({', '.join(sorted(set(self.frame['plate']))[:3])}…), "
+                "or the image files themselves.",
+            )
+            return
+
+        self.resolver = resolver
+        self.ambiguous_roots = []
+        if self.dataset is not None:
+            self._resolver_cache[str(self.dataset.directory)] = (resolver, [])
+        self._update_source_label()
+        self.preview.clear()
+        self.status.emit(f"source data: {root}")
+
+    def _update_source_label(self) -> None:
+        """Say where previews come from, and whether that was a guess."""
+        if self.resolver is None:
+            self.source_label.setText("not found — click Locate…")
+            self.source_label.setToolTip("")
+            return
+
+        root = str(self.resolver.root)
+        # Keep the tail, which is the part that identifies the screen.
+        shown = root if len(root) <= 34 else "…" + root[-33:]
+
+        if self.ambiguous_roots:
+            # Several screens matched. Naming one as if it were certain is how
+            # a preview from the wrong experiment gets believed.
+            self.source_label.setText(f"{shown}\n(guessed — other folders also match)")
+            self.source_label.setToolTip(
+                "Using:\n"
+                f"    {root}\n\n"
+                "These also matched, because screens share a filename "
+                "convention:\n    "
+                + "\n    ".join(self.ambiguous_roots)
+                + "\n\nUse Locate… if this is the wrong one."
+            )
+        else:
+            self.source_label.setText(shown)
+            self.source_label.setToolTip(root)
+
     def _on_dataset_changed(self) -> None:
         directory = self.dataset_box.currentData()
         if not directory:
@@ -470,9 +634,11 @@ class EmbeddingExplorer(QWidget):
             pathway_table=self.pathway_table,
         )
         self.resolver = self._resolve_images(self.frame)
+        self._update_source_label()
         self.result = None
         self._rebuild_colour_options()
         self._rebuild_filters()
+        self._update_points_hint()
         run = self.dataset.run_info.get("model", "")
         self._set_message(
             f"{self.dataset.name}: {self.dataset.n_points:,} points × "
@@ -486,16 +652,17 @@ class EmbeddingExplorer(QWidget):
         )
 
     def _image_root_candidates(self) -> list[Path]:
-        """Directories that might hold the original micrographs, best first.
+        """Directories that might hold this dataset's micrographs, best first.
 
         A loaded plate's image directory is the strongest signal -- the user
         confirmed that path by loading it -- and its PARENT matters just as
         much, because an export is organised one folder per plate and the
         metadata's ``plate`` column supplies that folder name.
 
-        The configured data root is offered last so the explorer still resolves
-        images when no plate is loaded at all, which is the whole point of
-        being able to open it from the empty state.
+        After those comes the data library: every DINO export was extracted
+        from a DIFFERENT screen, so there is no single correct image root.
+        The library's immediate subfolders are offered as candidates and the
+        one that actually resolves this dataset's rows wins.
         """
         candidates: list[Path] = []
 
@@ -512,20 +679,54 @@ class EmbeddingExplorer(QWidget):
                 offer(directory.parent.parent)
 
         offer(DEFAULT_IMAGE_ROOT)
+
+        # The screens themselves. Sorted newest first: a dataset being
+        # explored is usually a recent one, and this is a linear scan whose
+        # cost is one directory listing per candidate until a hit.
+        if DATA_LIBRARY.is_dir():
+            try:
+                screens = [d for d in DATA_LIBRARY.iterdir() if d.is_dir()]
+            except OSError:
+                screens = []
+            for screen in sorted(screens, key=lambda d: d.name, reverse=True):
+                offer(screen)
         return candidates
 
     def _resolve_images(self, frame) -> ImageResolver | None:
-        """Pick the first candidate root that actually resolves this dataset.
+        """Find a root under which THIS dataset's rows resolve.
 
-        Detection is run against the built frame, not guessed from paths: the
-        only proof a root is right is that rows in THIS dataset are found
-        under it.
+        Detection is run against the built frame, not guessed from paths: a
+        directory existing proves nothing, and every dataset comes from a
+        different screen.
+
+        Screens often share a filename convention -- NIS writes
+        ``WellA01_PointA01_0000_Channel....tiff`` for every plate of every
+        experiment -- so several roots can match one dataset equally well and
+        no heuristic can tell which is the right one. When that happens the
+        first is used and ``ambiguous_roots`` records the rest, so the UI can
+        say the choice was a guess instead of quietly showing images from the
+        wrong screen.
         """
+        key = str(self.dataset.directory) if self.dataset is not None else ""
+        if key and key in self._resolver_cache:
+            resolver, self.ambiguous_roots = self._resolver_cache[key]
+            return resolver
+
+        matches: list[ImageResolver] = []
         for candidate in self._image_root_candidates():
             resolver = ImageResolver.detect(candidate, frame)
             if resolver is not None:
-                return resolver
-        return None
+                matches.append(resolver)
+                # Two is enough to know it is ambiguous; scanning the whole
+                # library to count them all costs more than the answer is worth.
+                if len(matches) >= 2:
+                    break
+
+        chosen = matches[0] if matches else None
+        self.ambiguous_roots = [str(r.root) for r in matches[1:]]
+        if key:
+            self._resolver_cache[key] = (chosen, self.ambiguous_roots)
+        return chosen
 
     # -- controls ---------------------------------------------------------
 
@@ -603,7 +804,8 @@ class EmbeddingExplorer(QWidget):
             return
 
         self._busy = True
-        self.run_button.setEnabled(False)
+        self._cancelled = False
+        self._set_running(True)
         self._set_message(
             f"Computing {params.method} over {self.dataset.n_points:,} points…\n"
             "This runs once per parameter set and is then cached."
@@ -612,6 +814,7 @@ class EmbeddingExplorer(QWidget):
         signals.finished.connect(self._on_projection)
         signals.failed.connect(self._on_projection_failed)
         signals.progress.connect(lambda text: self.status.emit(text))
+        signals.advanced.connect(self._on_advanced)
         self._signals = signals  # keep alive for the task's lifetime
         QThreadPool.globalInstance().start(
             _ProjectionTask(
@@ -623,9 +826,42 @@ class EmbeddingExplorer(QWidget):
             )
         )
 
+    def _on_advanced(self, fraction: float, message: str) -> None:
+        """One step of the backend's own progress reporting."""
+        self.progress_bar.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
+        self.progress_label.setText(f"{message} — {fraction * 100:.0f}%")
+
+    def _set_running(self, running: bool) -> None:
+        for widget in (self.progress_bar, self.progress_label, self.cancel_button):
+            widget.setVisible(running)
+        self.run_button.setEnabled(not running)
+        if running:
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("starting…")
+
+    def _cancel_projection(self) -> None:
+        """Abandon the run.
+
+        The fit itself cannot be interrupted -- neither library takes a stop
+        flag -- so this detaches from the result rather than killing the work:
+        the worker finishes into a cache entry that a later run will reuse,
+        and the UI stops waiting. Saying so plainly beats a Cancel that
+        appears to hang.
+        """
+        self._cancelled = True
+        self._set_running(False)
+        self._set_message(
+            "Cancelled. The projection is still finishing in the background "
+            "and will be cached, so computing it again will be instant."
+        )
+        self.status.emit("projection cancelled")
+
     def _on_projection(self, result) -> None:
         self._busy = False
-        self.run_button.setEnabled(True)
+        self._set_running(False)
+        if self._cancelled:
+            # The user walked away from this run; it is cached, not shown.
+            return
         self.result = result
         self._set_message("")
         origin = "cached" if result.from_cache else f"{result.seconds:.1f}s"
@@ -636,7 +872,9 @@ class EmbeddingExplorer(QWidget):
 
     def _on_projection_failed(self, message: str) -> None:
         self._busy = False
-        self.run_button.setEnabled(True)
+        self._set_running(False)
+        if self._cancelled:
+            return
         self._set_message(f"Projection failed:\n{message}")
         self.status.emit("projection failed")
 
