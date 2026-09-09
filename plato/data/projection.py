@@ -86,6 +86,21 @@ class ProjectionResult:
     notes: list[str] = field(default_factory=list)
 
 
+class MissingDependency(RuntimeError):
+    """A projection backend is not installed.
+
+    These live behind an optional extra, so the message has to say what to
+    install rather than surfacing a bare "No module named 'umap'" in a dialog.
+    """
+
+    def __init__(self, package: str) -> None:
+        super().__init__(
+            f"{package} is not installed.\n\n"
+            f"The Embedding Explorer needs it. Install the optional extra:\n"
+            f'    pip install -e ".[gui,embed]"'
+        )
+
+
 def _prepare(vectors: np.ndarray, params: ProjectionParams) -> np.ndarray:
     """Normalise and optionally PCA-reduce before the neighbour search."""
     data = np.ascontiguousarray(vectors, dtype=np.float32)
@@ -100,7 +115,10 @@ def _prepare(vectors: np.ndarray, params: ProjectionParams) -> np.ndarray:
 
     n_components = min(params.pca_components, data.shape[0], data.shape[1])
     if params.pca_components and n_components >= 2:
-        from sklearn.decomposition import PCA
+        try:
+            from sklearn.decomposition import PCA
+        except ImportError as exc:  # pragma: no cover - depends on the install
+            raise MissingDependency("scikit-learn") from exc
 
         data = PCA(n_components=n_components, random_state=RANDOM_STATE).fit_transform(data)
         data = np.ascontiguousarray(data, dtype=np.float32)
@@ -115,7 +133,10 @@ def _subsample(n_rows: int, params: ProjectionParams) -> np.ndarray:
 
 
 def _run_umap(data: np.ndarray, params: ProjectionParams) -> np.ndarray:
-    import umap
+    try:
+        import umap
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        raise MissingDependency("umap-learn") from exc
 
     # n_neighbors must stay below the sample count; the tuned default of 500
     # is larger than some datasets are.
@@ -131,7 +152,10 @@ def _run_umap(data: np.ndarray, params: ProjectionParams) -> np.ndarray:
 
 
 def _run_tsne(data: np.ndarray, params: ProjectionParams) -> np.ndarray:
-    from openTSNE import TSNE
+    try:
+        from openTSNE import TSNE
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        raise MissingDependency("openTSNE") from exc
 
     # openTSNE requires perplexity < n_samples / 3.
     perplexity = float(max(5.0, min(params.perplexity, (data.shape[0] - 1) / 3.0)))

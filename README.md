@@ -1,9 +1,15 @@
 # PLATO — PLATe Overview
 
-Browse high-content screening images by experimental condition instead of by
-filename. Point it at an image folder and a plate map; it joins them, validates
-the join, and gives you a filterable thumbnail grid with a full-resolution
-viewer behind it.
+Explore a high-content screen by experimental condition instead of by filename.
+
+Two arms, as tabs over one session:
+
+* **Plate Browser** — point it at an image folder and a plate map; it joins
+  them, validates the join, and gives you a filterable thumbnail grid with a
+  full-resolution viewer behind it.
+* **Embedding Explorer** — plot precomputed feature vectors as UMAP or t-SNE,
+  colour them by any metadata field, and hover a point to see the micrograph
+  it came from.
 
 ## Install
 
@@ -13,7 +19,8 @@ pip install -e ".[gui,dev]"
 ```
 
 Python 3.11+. The indexing layer needs only numpy/pandas/tifffile/Pillow; the
-GUI adds PySide6 and pyqtgraph.
+GUI adds PySide6 and pyqtgraph. The Embedding Explorer additionally needs
+scikit-learn, umap-learn and openTSNE — install with `pip install -e ".[gui,embed]"`.
 
 ## Try it on synthetic data
 
@@ -137,6 +144,7 @@ to gate a pipeline on a clean join.
 
 | Key | Action |
 |---|---|
+| Ctrl+1 / Ctrl+2 | plate browser / embedding explorer |
 | Arrows | move between thumbnails |
 | Enter | open full resolution |
 | Space | flag / unflag selection |
@@ -153,6 +161,9 @@ to gate a pipeline on a clean join.
 | ←/→ (viewer) | step through the current filter |
 | A (viewer) | per-image autoscale |
 | S (viewer) | toggle scale bar |
+| hover (explorer) | preview the original image |
+| click (explorer) | open it at full resolution |
+| scroll / drag (explorer) | zoom / pan |
 
 ## Comparing along a variable
 
@@ -252,6 +263,67 @@ If your plate folders are named `P13_T1`, `P13_T2` and so on, the trailing
 (all T1 wells, regardless of plate). Turn it off in Settings if your folder
 names end in something that is not a timepoint.
 
+## Embedding Explorer
+
+The second tab (Ctrl+2) plots precomputed feature vectors in 2-D, so you can
+ask whether a CRISPRi knockdown lands where an antibiotic lands.
+
+It reads a DINO export: a directory holding `features_all.npz` (an
+`embeddings` array, one row per image) and a row-aligned
+`features_metadata.csv`. Point it at a folder of such directories with
+**Browse…**; each subfolder is offered in the dropdown.
+
+```
+Z:\Analysis\DINO\<dataset>    features_all.npz          embeddings: (N, D) float32
+    features_metadata.csv     N rows: plate, well, label, image_name, ...
+    features_label_map.json   optional
+    metadata.json             optional; model name, crop size
+```
+
+**Projections.** UMAP and t-SNE, defaulting to the recipe already used for
+these features elsewhere in the lab (cosine metric, `n_neighbors=500`,
+`min_dist=1.0`, fixed seed) after an L2 normalise and a PCA to 50 dimensions.
+Each result is cached under `.plato/projections/`, keyed by a fingerprint of
+the vectors plus every parameter that changes the output — so switching
+method, or reopening a dataset, is instant, and changing a parameter computes
+a genuinely new projection instead of serving a stale one. Long runs happen on
+a worker thread; the window stays live.
+
+**Colouring.** Gene, guide, antibiotic, concentration, MoA, pathway, control
+vs treatment, experiment arm, plate, well, or the raw condition. Categorical
+fields get a fixed palette assigned in sorted order, so a value keeps its
+colour between sessions and across both arms. A dose series is detected as
+numeric and gets a continuous ramp instead.
+
+**Hover and click.** Hovering previews the original micrograph with its
+metadata; clicking opens it in the same full-resolution viewer the browser
+uses, stepping through the currently filtered selection. Rows are matched to
+files through the metadata columns, never through row position — the export's
+row order is an artefact of the extractor's directory walk. Set
+`PLATO_IMAGE_ROOT` if your images are not where a loaded plate points.
+
+**Export.** PNG and SVG, both from the live scene, so the file carries
+whatever is on screen: method, colouring, filters, zoom and legend. The SVG is
+real vector geometry, not a raster in a wrapper.
+
+### MoA and pathway annotation
+
+Mechanism of action is **not** in the dataset. The plate maps carry only the
+condition string, so PLATO loads MoA and pathway from a separate file and
+never guesses:
+
+* **Drug -> MoA** is read from the lab's own table if it is found next to the
+  PLATO checkout (`AI4AB/analysis/E_coli_params/moa_dict_inv.json` or
+  `moa_dict.json`), or from `annotations/drug_moa.csv`. Lookup ignores case
+  and spacing, so `Penicillin G` matches a table written `PenicillinG`.
+* **Gene -> pathway** is read from `annotations/gene_pathway.csv`, which ships
+  **deliberately blank**. Fill it in to colour the CRISPRi arm by pathway.
+  Using the same class names as your MoA table is what puts both arms in one
+  colour space, which is the point of the comparison.
+
+Anything not covered reads as `unannotated` and draws grey, so a gap in the
+table is visible rather than silently miscoloured.
+
 ## Two things that are deliberate, not oversights
 
 **Contrast is fixed per channel across the whole screen.** Limits are estimated
@@ -271,21 +343,35 @@ hit calls, figure selection — score blind and reveal afterwards.
 config.py     TOML -> dataclasses; nothing experiment-specific is hardcoded
 wells.py      A1 / A01 / a1 -> canonical (row, col). Join failures start here.
 ordering.py   filter values sorted by magnitude, so a dose series reads as one
-index/
-  filenames.py  regex -> ImageRecord
-  platemap.py   Excel/CSV -> tidy frame, sanitised column names
-  build.py      join + ValidationReport + write
-  db.py         SQLite schema and the query API the GUI uses
+data/                 everything that knows about files; no Qt anywhere here
+  session.py            several IndexDBs unioned behind one query API
+  index/
+    filenames.py          regex -> ImageRecord
+    platemap.py           Excel/CSV -> tidy frame, sanitised column names
+    build.py              join + ValidationReport + write
+    db.py                 SQLite schema and the query API both arms use
+  embeddings.py         a DINO export (vectors + row-aligned metadata)
+  projection.py         UMAP / t-SNE, cached on disk by dataset + parameters
+  annotations.py        condition strings -> gene/guide/drug/dose; MoA tables
+  explorer_model.py     the joined frame behind the scatter, + image resolution
 cache/
-  thumbnails.py offline PNG cache in SQLite, fixed per-channel levels
-gui/
-  session.py    several IndexDBs unioned behind one query API; plate identity
-  model.py      QAbstractListModel, thumbnails fetched off-thread
-  delegate.py   tile painting
-  panel.py      filters + grid + metadata (one panel; two = compare mode)
-  plates_dialog.py  what is loaded, and unloading one
-  viewer.py     pyqtgraph full-resolution window
-  main_window.py
+  thumbnails.py         offline PNG cache in SQLite, fixed per-channel levels
+views/                the two analysis arms, as plain QWidgets
+  browser.py            filters + grid + metadata (one panel; two = compare)
+  browser_arm.py        the panels and the N-way comparison, as one tab
+  model.py              QAbstractListModel, thumbnails fetched off-thread
+  delegate.py           tile painting
+  compare_view.py       the N-way comparison
+  explorer.py           the embedding explorer tab
+  scatter.py            pyqtgraph scatter: hover, click, PNG/SVG export
+  preview.py            hover preview, loaded off-thread
+  palette.py            stable categorical colours, continuous dose ramps
+gui/                  the shell and everything Qt-only
+  main_window.py        menu, shortcuts, and the two tabs
+  viewer.py             pyqtgraph full-resolution window (both arms open it)
+  progress.py           worker thread + progress bar for long loads
+  branding.py           the logo and the display typeface
+  load_dialog.py, plates_dialog.py, settings.py, detect.py, theme.py
 ```
 
 Derived state (`images`, `platemap`, `display_limits`, thumbnails) is
@@ -355,6 +441,18 @@ lookup (~0 ms) rather than a ~33 ms decode per column.
 - Blinded review hides the metadata and randomises order, but does not clear
   the filters. Filtering to one condition and then entering blind mode leaves
   you scoring a set you already know the label of.
+- The explorer plots what the embedding export contains. It does not compute
+  features; if `features_all.npz` is missing it says so and names the path it
+  looked in, rather than showing an empty plot.
+- Colouring by a field with more than ~24 values drops the legend and keeps
+  the colours, and the categorical palette wraps after 20. At that cardinality
+  the legend is the wrong tool — filter instead.
+- t-SNE and UMAP are laid out per projection, not per filter: filtering hides
+  points, it does not re-embed the ones that remain. That is deliberate (the
+  layout stays comparable across filters) but it does mean a heavily filtered
+  view is a crop of the full embedding, not a projection of the subset.
+- Blinded review applies to the browser only. The explorer always shows its
+  metadata, so it is not a scoring surface.
 
 ## Tests
 

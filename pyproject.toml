@@ -18,6 +18,9 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.6", "pyqtgraph>=0.13"]
+# The Embedding Explorer only. Kept out of `gui` so the plate browser still
+# installs without a compiler toolchain for umap-learn's numba dependency.
+embed = ["scikit-learn>=1.4", "umap-learn>=0.5", "openTSNE>=1.0"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
@@ -25,6 +28,9 @@ plato = "plato.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["plato*"]
+
+[tool.setuptools.package-data]
+"plato.gui" = ["assets/*.svg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

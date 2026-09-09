@@ -356,3 +356,26 @@ def test_resolver_prefers_a_root_that_actually_resolves(tmp_path):
     resolver = ImageResolver.detect(real, abx)
     assert resolver is not None
     assert resolver.path_for(abx.iloc[0]) is not None
+
+
+def test_missing_backend_says_what_to_install(monkeypatch):
+    """The explorer's libraries are an optional extra, so a missing one must
+    name the install command rather than surfacing "No module named 'umap'"."""
+    import builtins
+
+    from plato.data.projection import MissingDependency
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name.split(".")[0] in {"umap", "openTSNE", "sklearn"}:
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(MissingDependency) as excinfo:
+        project(
+            np.random.default_rng(0).normal(size=(40, 8)).astype(np.float32),
+            ProjectionParams(n_neighbors=5, pca_components=4),
+        )
+    assert "pip install" in str(excinfo.value)
