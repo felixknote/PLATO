@@ -119,3 +119,83 @@ def test_build_without_thumbnails_says_what_to_do():
 
     with pytest.raises(ValueError, match="thumbs"):
         build(_Session())
+
+
+# -- computing features for an export whose vectors are missing --------------
+
+
+def _export_with_metadata_only(tmp_path, n=40):
+    """An export directory that describes images but has no feature array."""
+    import pandas as pd
+    import tifffile
+
+    directory = tmp_path / "export"
+    directory.mkdir()
+    images = tmp_path / "images" / "P1"
+    images.mkdir(parents=True)
+
+    rng = np.random.default_rng(0)
+    rows = []
+    for i in range(n):
+        name = f"img_{i:04d}"
+        tifffile.imwrite(
+            images / f"{name}.tiff",
+            rng.integers(0, 4096, size=(48, 48), dtype=np.uint16),
+        )
+        rows.append({"plate": "P1", "well": f"A{i % 12 + 1:02d}",
+                     "label": f"gene{i % 4}_1", "image_name": name})
+    pd.DataFrame(rows).to_csv(directory / "features_metadata.csv", index=False)
+    return directory, tmp_path / "images"
+
+
+def test_computes_features_for_an_export_missing_its_vectors(tmp_path):
+    """Metadata without vectors must not be a dead end."""
+    from plato.data.explorer_model import ImageResolver, build_frame
+    from plato.data.export_features import COMPUTED_FILENAME, build
+
+    directory, image_root = _export_with_metadata_only(tmp_path)
+    import pandas as pd
+
+    metadata = pd.read_csv(directory / "features_metadata.csv", dtype=str)
+    resolver = ImageResolver.detect(image_root, metadata)
+    assert resolver is not None
+
+    dataset = build(directory, resolver)
+    assert dataset.n_points == 40
+    assert dataset.run_info.get("computed") is True
+    # The export's own annotation survives, which is the whole point.
+    frame, _ = build_frame(dataset)
+    assert set(frame["gene"]) == {"gene0", "gene1", "gene2", "gene3"}
+
+    # A complete run is cached and reused.
+    assert (directory / COMPUTED_FILENAME).exists()
+    again = build(directory, resolver=None)
+    assert again.n_points == 40
+
+
+def test_partial_runs_are_not_cached(tmp_path):
+    """A sampled run has fewer rows than the metadata and must not be stored.
+
+    The row-count guard would reject it on load, so writing it would leave a
+    file that looks like an answer and never is.
+    """
+    from plato.data.explorer_model import ImageResolver
+    from plato.data.export_features import COMPUTED_FILENAME, build
+
+    directory, image_root = _export_with_metadata_only(tmp_path)
+    import pandas as pd
+
+    metadata = pd.read_csv(directory / "features_metadata.csv", dtype=str)
+    resolver = ImageResolver.detect(image_root, metadata)
+
+    dataset = build(directory, resolver, max_images=10)
+    assert dataset.n_points <= 10
+    assert not (directory / COMPUTED_FILENAME).exists()
+
+
+def test_computing_without_a_resolver_says_what_to_do(tmp_path):
+    from plato.data.export_features import build
+
+    directory, _ = _export_with_metadata_only(tmp_path)
+    with pytest.raises(ValueError, match="Locate"):
+        build(directory, resolver=None)

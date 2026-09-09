@@ -449,6 +449,15 @@ class EmbeddingExplorer(QWidget):
         self.message.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.message.setStyleSheet(f"color: {TEXT_MUTED}; padding: 18px;")
 
+        self.compute_features_button = QPushButton("Compute features from images")
+        self.compute_features_button.setToolTip(
+            "Describe the images this export refers to, using its own "
+            "metadata. Simple descriptors, not learned embeddings."
+        )
+        self.compute_features_button.clicked.connect(self._compute_missing_features)
+        self.compute_features_button.hide()
+        self._missing_vectors_dir: Path | None = None
+
         self.count_label = QLabel("—")
         self.count_label.setStyleSheet(f"color: {TEXT_MUTED};")
 
@@ -473,6 +482,7 @@ class EmbeddingExplorer(QWidget):
         centre.setSpacing(0)
         centre.addWidget(toolbar_widget)
         centre.addWidget(self.message, 1)
+        centre.addWidget(self.compute_features_button, 0, Qt.AlignmentFlag.AlignCenter)
         centre.addWidget(self.scatter, 1)
         centre.addWidget(self.gallery)
         centre_widget = QWidget()
@@ -684,11 +694,22 @@ class EmbeddingExplorer(QWidget):
             return
         try:
             self.dataset = load_dataset(Path(directory))
+            self.compute_features_button.setVisible(False)
         except EmbeddingError as exc:
             self.dataset = None
             self.frame = None
             self._clear_filters()
-            self._set_message(str(exc))
+            # An export whose metadata exists but whose vectors do not is not
+            # a dead end: the images it describes can be described directly,
+            # keeping all of its own annotation.
+            self._missing_vectors_dir = Path(directory)
+            self._set_message(
+                str(exc)
+                + "\n\nPLATO can describe the images themselves instead — "
+                "the export's own metadata is kept, so colouring by gene, "
+                "drug and MoA still works."
+            )
+            self.compute_features_button.setVisible(True)
             self.status.emit("embeddings unavailable")
             return
         except (OSError, ValueError) as exc:
@@ -718,6 +739,82 @@ class EmbeddingExplorer(QWidget):
             f"{self.dataset.name}: {self.dataset.n_points:,} embeddings"
             + ("" if self.resolver else " · original images not found")
         )
+
+    def _compute_missing_features(self) -> None:
+        """Describe an export's images when its vector file is missing."""
+        directory = self._missing_vectors_dir
+        if directory is None:
+            return
+
+        from ..data.export_features import build as build_from_export
+        from ..gui.progress import run_with_progress
+
+        # Locating the images is a prerequisite, and this export has no frame
+        # yet -- so build one from its metadata to search with.
+        import pandas as pd
+
+        from ..data.embeddings import METADATA_FILENAME
+
+        try:
+            metadata = pd.read_csv(directory / METADATA_FILENAME, dtype=str).fillna("")
+        except (OSError, ValueError) as exc:
+            self._set_message(f"Could not read this export's metadata:\n{exc}")
+            return
+
+        resolver = self.resolver
+        if resolver is None:
+            resolver = self._resolve_images_now(metadata)
+        if resolver is None:
+            QMessageBox.information(
+                self,
+                "Source data",
+                "The original images have not been found yet.\n\n"
+                "Use Locate… to point PLATO at them, then compute again.",
+            )
+            return
+
+        def job(report):
+            return build_from_export(directory, resolver, progress=report)
+
+        dataset, error, cancelled = run_with_progress(
+            job, f"Describing {directory.name}", self
+        )
+        if cancelled:
+            return
+        if error is not None:
+            self._set_message(str(error))
+            return
+
+        self.compute_features_button.setVisible(False)
+        self.dataset = dataset
+        self.frame, _ = build_frame(
+            dataset, moa_table=self.moa_table, pathway_table=self.pathway_table
+        )
+        self.resolver = resolver
+        self._update_source_label()
+        self.result = None
+        self._rebuild_colour_options()
+        self._rebuild_filters()
+        self._update_points_hint()
+        self._set_message(
+            f"{dataset.n_points:,} images described by "
+            f"{dataset.n_dimensions} image features, using "
+            f"{directory.name}'s own metadata.\n\n"
+            "These are simple descriptors computed from the images, not "
+            "learned embeddings — good for plate effects, outliers and gross "
+            "phenotypes, but not a substitute for the real export when making "
+            "a phenotype claim.\n\n"
+            "Choose a method and press Compute projection."
+        )
+        self.status.emit(f"{dataset.n_points:,} images described")
+
+    def _resolve_images_now(self, frame):
+        """Synchronous root hunt, for when the answer is needed immediately."""
+        for candidate in self._image_root_candidates():
+            resolver = ImageResolver.detect(candidate, frame)
+            if resolver is not None:
+                return resolver
+        return None
 
     def _load_computed_dataset(self) -> None:
         """Describe the loaded plates' thumbnails and use that as the dataset."""
