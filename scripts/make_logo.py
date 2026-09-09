@@ -92,9 +92,15 @@ def build() -> str:
     add("</defs>")
 
     # --- tile
+    #
+    # No fill: the mark sits on whatever the surrounding UI is painted with,
+    # so it works on the dark panel, on a light dialog, and on a document
+    # background without three exported variants. Only the rim is drawn, and
+    # in a colour that reads against both -- a solid tile would punch a dark
+    # square into a light page.
     add(
         f'<rect x="4" y="4" width="{S - 8}" height="{S - 8}" rx="{TILE_R}" '
-        f'fill="{TILE_BG}" stroke="{TILE_EDGE}" stroke-width="8"/>'
+        f'fill="none" stroke="{TILE_EDGE}" stroke-width="8"/>'
     )
 
     # --- plate panel

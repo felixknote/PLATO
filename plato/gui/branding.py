@@ -22,21 +22,25 @@ from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 ASSETS = Path(__file__).parent / "assets"
 LOGO_SVG = ASSETS / "logo.svg"
 
-# Display face for the wordmark and headings.
+# Display face for the wordmark, tab bar and panel headings.
 #
-# Gill Sans is the humanist sans this mark was designed against: its wide,
-# classical proportions suit the geometric plate, and it ships with Office so
-# it is present on the machines this runs on. The fallbacks walk down through
-# other humanist sans faces before reaching the generic.
-DISPLAY_STACK = '"Gill Sans MT", "Gill Sans", Optima, Candara, "Segoe UI", sans-serif'
+# Bahnschrift is Microsoft's DIN -- an industrial grotesque with the flat
+# terminals and open counters that suit a mark built from a plate grid. It is
+# a Windows system font, so it is present on the machines this runs on, and
+# the fallbacks walk down through other DIN-adjacent grotesques before
+# reaching the generic.
+DISPLAY_STACK = (
+    '"Bahnschrift", "DIN Next", "Roboto Condensed", "Segoe UI", sans-serif'
+)
 
-# Body face. Segoe UI is the system face and the one the rest of the GUI
-# already renders in; keeping body text on it means the display face reads as
-# a deliberate accent rather than a second competing voice.
+# Body face. Left on the system UI face: the display face reads as a
+# deliberate accent only while everything around it does not compete.
 BODY_STACK = '"Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif'
 
-# Serif, for the few places a figure caption wants one.
-SERIF_STACK = '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif'
+# Serif, for figure captions and anything that wants to read as prose.
+# Cambria was designed for screen reading at small sizes, which is what a
+# caption under a micrograph is.
+SERIF_STACK = '"Cambria", "Georgia", "Palatino Linotype", serif'
 
 # Letter-spacing for the wordmark, in em. The mark is five wide capitals; at
 # normal tracking they crowd, and the logo reads as a word rather than a mark.
@@ -60,6 +64,70 @@ def logo_pixmap(size: int) -> QPixmap:
     if not renderer.isValid():
         return QPixmap()
 
+    # Render at the display's true pixel density, not at logical size. On a
+    # 150% or 200% display Qt scales a logical-size pixmap up to fill the
+    # space, which is exactly the blur an SVG exists to avoid. Drawing at
+    # size x ratio and tagging the pixmap with that ratio makes Qt lay it out
+    # at `size` points while showing every physical pixel.
+    ratio = _device_ratio()
+    physical = max(1, int(round(size * ratio)))
+
+    image = QImage(physical, physical, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    renderer.render(painter)
+    painter.end()
+
+    pixmap = QPixmap.fromImage(image)
+    pixmap.setDevicePixelRatio(ratio)
+    return pixmap
+
+
+def _device_ratio() -> float:
+    """The current display's pixel ratio, or 1.0 with no application yet.
+
+    Read live rather than cached: the app can be moved to a second monitor
+    with a different scaling factor.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return 1.0
+    screen = app.primaryScreen()
+    return float(screen.devicePixelRatio()) if screen is not None else 1.0
+
+
+def app_icon() -> QIcon:
+    """The window/taskbar icon, at the sizes Windows actually asks for.
+
+    Rendered at 1:1 rather than through ``logo_pixmap``: a QIcon chooses
+    between its pixmaps by physical size, so a ratio-tagged pixmap would make
+    it pick the wrong one. 512 is included for the large tiles Windows uses
+    in task switching and the store-style views.
+    """
+    icon = QIcon()
+    for size in (16, 24, 32, 48, 64, 128, 256, 512):
+        pixmap = _render(size)
+        if not pixmap.isNull():
+            icon.addPixmap(pixmap)
+    return icon
+
+
+def _render(size: int) -> QPixmap:
+    """The logo at exactly ``size`` physical pixels, untagged."""
+    try:
+        from PySide6.QtSvg import QSvgRenderer
+    except ImportError:  # pragma: no cover - Qt built without SVG support
+        return QPixmap()
+    if not LOGO_SVG.exists():
+        return QPixmap()
+    renderer = QSvgRenderer(str(LOGO_SVG))
+    if not renderer.isValid():
+        return QPixmap()
+
     image = QImage(size, size, QImage.Format.Format_ARGB32)
     image.fill(Qt.GlobalColor.transparent)
     painter = QPainter(image)
@@ -67,13 +135,3 @@ def logo_pixmap(size: int) -> QPixmap:
     renderer.render(painter)
     painter.end()
     return QPixmap.fromImage(image)
-
-
-def app_icon() -> QIcon:
-    """The window/taskbar icon, at the sizes Windows actually asks for."""
-    icon = QIcon()
-    for size in (16, 24, 32, 48, 64, 128, 256):
-        pixmap = logo_pixmap(size)
-        if not pixmap.isNull():
-            icon.addPixmap(pixmap)
-    return icon

@@ -6,7 +6,7 @@
 <filter id="glow-purple" x="-140%" y="-140%" width="380%" height="380%"><feGaussianBlur stdDeviation="5.5" result="b"/><feFlood flood-color="#7977d2" flood-opacity="0.85"/><feComposite in2="b" operator="in" result="g"/><feMerge><feMergeNode in="g"/><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
 <filter id="glow-teal" x="-140%" y="-140%" width="380%" height="380%"><feGaussianBlur stdDeviation="5.5" result="b"/><feFlood flood-color="#3fa9a2" flood-opacity="0.85"/><feComposite in2="b" operator="in" result="g"/><feMerge><feMergeNode in="g"/><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
 </defs>
-<rect x="4" y="4" width="504" height="504" rx="112" fill="#0b1730" stroke="#141f38" stroke-width="8"/>
+<rect x="4" y="4" width="504" height="504" rx="112" fill="none" stroke="#141f38" stroke-width="8"/>
 <rect x="62.2" y="125.2" width="387.5" height="261.5" rx="10" fill="none" stroke="#a0a7b3" stroke-width="3" opacity="0.9"/>
 <g fill="none" stroke="#a0a7b3" stroke-width="2.6" opacity="0.75">
 <circle cx="88.2" cy="149.2" r="12.4"/>
