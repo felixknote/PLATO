@@ -13,6 +13,7 @@ re-draw the same coordinates, which is what keeps exploration fluid.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -82,6 +83,17 @@ MAX_LEGEND_ENTRIES = 24
 
 # Filter lists longer than this are searchable rather than fully listed.
 MAX_FILTER_VALUES = 120
+
+# Fallback location of the original micrographs, used only when no loaded
+# plate points at them -- which is the case when the explorer is opened
+# straight from the empty state. Overridable with PLATO_IMAGE_ROOT so this is
+# a default rather than an assumption baked into the code.
+DEFAULT_IMAGE_ROOT = Path(
+    os.environ.get(
+        "PLATO_IMAGE_ROOT",
+        r"Z:\Data\FK_P001_EX0039_2026_08_28_CRISPRI & ABx Experiment",
+    )
+)
 
 
 class _WorkerSignals(QObject):
@@ -452,13 +464,12 @@ class EmbeddingExplorer(QWidget):
             self._set_message(f"Could not read this dataset:\n{exc}")
             return
 
-        image_root = self._image_root_guess()
-        self.frame, self.resolver = build_frame(
+        self.frame, _ = build_frame(
             self.dataset,
             moa_table=self.moa_table,
             pathway_table=self.pathway_table,
-            image_root=image_root,
         )
+        self.resolver = self._resolve_images(self.frame)
         self.result = None
         self._rebuild_colour_options()
         self._rebuild_filters()
@@ -474,24 +485,47 @@ class EmbeddingExplorer(QWidget):
             + ("" if self.resolver else " · original images not found")
         )
 
-    def _image_root_guess(self) -> Path | None:
-        """Where the original micrographs live.
+    def _image_root_candidates(self) -> list[Path]:
+        """Directories that might hold the original micrographs, best first.
 
-        Prefers a loaded plate's image directory (its parent, since the export
-        is organised one folder per plate), because that is a path the user has
-        already confirmed by loading it. Falls back to nothing rather than
-        guessing at the filesystem.
+        A loaded plate's image directory is the strongest signal -- the user
+        confirmed that path by loading it -- and its PARENT matters just as
+        much, because an export is organised one folder per plate and the
+        metadata's ``plate`` column supplies that folder name.
+
+        The configured data root is offered last so the explorer still resolves
+        images when no plate is loaded at all, which is the whole point of
+        being able to open it from the empty state.
         """
         candidates: list[Path] = []
+
+        def offer(path: Path) -> None:
+            if path.is_dir() and path not in candidates:
+                candidates.append(path)
+
         for plate in getattr(self.session, "plates", []):
             directory = Path(plate.cfg.images.dir)
-            candidates.extend((directory, directory.parent))
-        for candidate in candidates:
-            if candidate.is_dir():
-                probe = ImageResolver.detect(candidate, self.frame if self.frame is not None else None) if self.frame is not None else None
-                if probe is not None:
-                    return candidate
-        return candidates[0] if candidates else None
+            offer(directory)
+            offer(directory.parent)
+            # An images/ subfolder means the plate folder is one level up again.
+            if directory.name.lower() == "images":
+                offer(directory.parent.parent)
+
+        offer(DEFAULT_IMAGE_ROOT)
+        return candidates
+
+    def _resolve_images(self, frame) -> ImageResolver | None:
+        """Pick the first candidate root that actually resolves this dataset.
+
+        Detection is run against the built frame, not guessed from paths: the
+        only proof a root is right is that rows in THIS dataset are found
+        under it.
+        """
+        for candidate in self._image_root_candidates():
+            resolver = ImageResolver.detect(candidate, frame)
+            if resolver is not None:
+                return resolver
+        return None
 
     # -- controls ---------------------------------------------------------
 

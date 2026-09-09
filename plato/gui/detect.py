@@ -61,10 +61,20 @@ GENE_REPLICATE_SPLIT = r"^(?P<gene>.+)_(?P<replicate>\d+)$"
 # concentration on the next line. Control wells ("WT", "WT NC") have no
 # concentration line and are correctly left unsplit, not misparsed.
 ANTIBIOTIC_CONCENTRATION_SPLIT = r"^(?P<antibiotic>[^\n]+)\n(?P<concentration>.+)$"
+# The same drug/dose pairing written on ONE line -- "Ciprofloxacin 1x",
+# "Penicillin G 0.25x". An exported CSV flattens the newline the Excel
+# original used, so both forms turn up in the same screen. The drug group is
+# lazy and the dose anchored to the end, which keeps two-word names
+# ("Polymyxin B", "Penicillin G") whole instead of splitting at the first
+# space. Control wells ("WT", "WT NC") carry no dose and stay unsplit.
+ANTIBIOTIC_DOSE_INLINE_SPLIT = (
+    r"^(?P<antibiotic>.+?)\s+(?P<concentration>[\d.]+\s*x)$"
+)
 
 KNOWN_SPLIT_PATTERNS: list[str] = [
     GENE_REPLICATE_SPLIT,
     ANTIBIOTIC_CONCENTRATION_SPLIT,
+    ANTIBIOTIC_DOSE_INLINE_SPLIT,
 ]
 
 
@@ -126,17 +136,34 @@ def detect_platemap_layout(
         if len(result.frame) > 0:
             return PlatemapGuess(layout="long", well_column=well_column)
 
-    try:
-        plain = read_platemap(
-            path,
-            layout="matrix",
-            header_row=False,
-            index_col=False,
-            plate_format=plate_format,
-        )
-    except (ValueError, FileNotFoundError):
-        return None
-    if len(plain.frame) == 0:
+    # A hand-laid-out plate map may or may not carry its 1..12 column
+    # numbers and A..H row letters. Both are common -- an Excel grid usually
+    # has them, an exported one often does not -- and the grid-shape check in
+    # read_platemap rejects every combination but the right one, so trying all
+    # four is what makes real plate maps load without the user having to know
+    # which kind theirs is.
+    grid_shapes = [
+        (header, index) for header in (False, True) for index in (False, True)
+    ]
+
+    plain = None
+    header_row = index_col = False
+    for header, index in grid_shapes:
+        try:
+            candidate = read_platemap(
+                path,
+                layout="matrix",
+                header_row=header,
+                index_col=index,
+                plate_format=plate_format,
+            )
+        except (ValueError, FileNotFoundError):
+            continue
+        if len(candidate.frame) > 0:
+            plain, header_row, index_col = candidate, header, index
+            break
+
+    if plain is None:
         return None
 
     best_pattern: str | None = None
@@ -146,8 +173,8 @@ def detect_platemap_layout(
             split = read_platemap(
                 path,
                 layout="matrix",
-                header_row=False,
-                index_col=False,
+                header_row=header_row,
+                index_col=index_col,
                 split_pattern=pattern,
                 plate_format=plate_format,
             )
@@ -162,12 +189,12 @@ def detect_platemap_layout(
             best_pattern = pattern
             best_split_count = split_count
 
-    if best_pattern is not None:
-        return PlatemapGuess(
-            layout="matrix", header_row=False, index_col=False, split_pattern=best_pattern
-        )
-
-    return PlatemapGuess(layout="matrix", header_row=False, index_col=False)
+    return PlatemapGuess(
+        layout="matrix",
+        header_row=header_row,
+        index_col=index_col,
+        split_pattern=best_pattern or "",
+    )
 
 
 def compile_or_none(pattern: str) -> bool:
