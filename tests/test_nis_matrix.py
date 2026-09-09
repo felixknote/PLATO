@@ -16,9 +16,9 @@ import pytest
 import tifffile
 
 from plato.config import load_config
-from plato.index import IndexDB, build_index
-from plato.index.filenames import compile_pattern, parse_files
-from plato.index.platemap import plate_from_filename, read_matrix_platemap
+from plato.data.index import IndexDB, build_index
+from plato.data.index.filenames import compile_pattern, parse_files
+from plato.data.index.platemap import plate_from_filename, read_matrix_platemap
 
 NIS_PATTERN = (
     r"^Well(?P<well>[A-P]\d{1,2})_Point(?P<point>[^_]+)_(?P<field>\d+)"

@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .session import Session
+from ..data.session import Session
 
 # Above this, a variable is almost certainly an identifier (image_id, path)
 # rather than something you compare along, and the value list is unusable.

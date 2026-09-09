@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication
 
 from ..config import Config
 from .main_window import MainWindow
-from .session import Session
+from ..data.session import Session
 from .theme import apply_theme
 
 

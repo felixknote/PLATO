@@ -252,12 +252,18 @@ def build_thumbnails(
     force: bool = False,
     verbose: bool = True,
     autoscale: bool = True,
+    progress=None,
 ) -> int:
     """Build (or refresh) the thumbnail cache. Returns the number rendered.
 
     Incremental: an image is re-rendered only if its mtime or size changed.
+
+    ``progress`` is an optional ``callable(done, total, message)`` invoked from
+    the calling thread as work completes. It exists so a GUI can show a real
+    progress bar: this is minutes of work on a full plate, and a window that
+    simply stops responding for that long is indistinguishable from a hang.
     """
-    from ..index import db as index_db
+    from ..data.index import db as index_db
 
     if workers is None:
         workers = default_worker_count()
@@ -296,6 +302,8 @@ def build_thumbnails(
         con.close()
         return 0
 
+    if progress:
+        progress(0, len(todo), "estimating display limits…")
     limits = estimate_display_limits(
         jobs, percentiles=percentiles, sample_size=sample_size, workers=workers
     )
@@ -337,6 +345,8 @@ def build_thumbnails(
                 (job.image_id, job.mtime, job.size_bytes, w, h, png, autoscale_png),
             )
             done += 1
+            if progress and (done % 25 == 0 or done == len(todo)):
+                progress(done, len(todo), f"rendering thumbnails… {done}/{len(todo)}")
             if verbose and done % 250 == 0:
                 con.commit()
                 print(f"  {done}/{len(todo)}")

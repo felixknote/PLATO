@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..wells import PLATE_GEOMETRIES, Well, WellParseError, parse_well
+from ...wells import PLATE_GEOMETRIES, Well, WellParseError, parse_well
 
 RESERVED = {"plate", "well", "well_row", "well_col"}
 

@@ -28,10 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import Config
-from ..index.db import ImageRow, IndexDB
+from .index.db import ImageRow, IndexDB
 from ..ordering import sort_series
 from ..wells import parse_well
-from .settings import get_show_timepoint
+from ..gui.settings import get_show_timepoint
 
 # Filter column name for the plate-name timepoint suffix.
 TIMEPOINT = "timepoint"

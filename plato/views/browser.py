@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -37,12 +37,12 @@ from PySide6.QtWidgets import (
 )
 
 from ..cache import read_plane, scale_to_uint8
-from ..index.db import ImageRow
+from ..data.index.db import ImageRow
 from .delegate import ThumbnailDelegate
 from .model import ROW_ROLE, ThumbnailModel
-from .scalebar import draw_scale_bar
-from .session import Session
-from .viewer import ImageWindow
+from ..gui.scalebar import draw_scale_bar
+from ..data.session import Session
+from ..gui.viewer import ImageWindow
 
 MAX_DISTINCT_FOR_FILTER = 60
 EXPORT_FORMATS = ["TIFF (original)", "JPEG (converted)"]
@@ -182,7 +182,16 @@ class BrowserPanel(QWidget):
 
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search genes, treatments, wells…")
-        self.search.textChanged.connect(self.refresh)
+        # Debounced, not immediate. Each query is a LEFT JOIN over every loaded
+        # plate's index -- ~130 ms across sixteen 2016-image plates -- and it
+        # runs on the GUI thread, so firing one per keystroke makes typing in
+        # this box feel broken on a large session. One query once typing pauses
+        # returns the same rows.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(180)
+        self._search_timer.timeout.connect(self.refresh)
+        self.search.textChanged.connect(self._search_timer.start)
 
         self.flagged_only = QCheckBox("Flagged only")
         self.flagged_only.toggled.connect(self.refresh)
@@ -340,6 +349,8 @@ class BrowserPanel(QWidget):
         return {box.column: box.selected() for box in self.filters if box.selected()}
 
     def refresh(self) -> None:
+        # Cancel a queued keystroke-driven refresh: this call supersedes it.
+        self._search_timer.stop()
         order = "RANDOM()" if self.blind else "plate, well_row, well_col, field, channel"
         rows = self.session.query(
             self.current_filters(),

@@ -148,6 +148,7 @@ class IndexDB:
         self.con = connect(path, read_only=read_only)
         self.metadata_columns: list[str] = get_meta(self.con, "metadata_columns", []) or []
         self.column_labels: dict[str, str] = get_meta(self.con, "column_labels", {}) or {}
+        self._columns: set[str] = set()
 
     # -- introspection ----------------------------------------------------
 
@@ -160,13 +161,37 @@ class IndexDB:
         present = [c for c in structural if self._has_values(c)]
         return present + list(self.metadata_columns)
 
+    def has_column(self, column: str) -> bool:
+        """Whether ``image_view`` actually has this column.
+
+        Two plates in one session need not share a vocabulary: a CRISPRi plate
+        map yields gene/replicate, an antibiotic one yields
+        antibiotic/concentration. The session offers the *union* as filters, so
+        every plate is asked about columns it may not have, and an unguarded
+        query raises ``no such column`` against the plate that lacks it --
+        taking down a filter that is perfectly valid for the other plate.
+        """
+        if column in self._columns:
+            return True
+        # Cached because this is consulted per query, per column.
+        self._columns = {
+            str(row["name"])
+            for row in self.con.execute("PRAGMA table_info(image_view)").fetchall()
+        }
+        return column in self._columns
+
     def _has_values(self, column: str) -> bool:
+        if not self.has_column(column):
+            return False
         row = self.con.execute(
             f"SELECT COUNT(*) AS n FROM (SELECT 1 FROM image_view WHERE {column} IS NOT NULL LIMIT 1)"
         ).fetchone()
         return bool(row["n"])
 
     def distinct(self, column: str) -> list[str]:
+        """Distinct values, or empty for a column this plate does not have."""
+        if not self.has_column(column):
+            return []
         rows = self.con.execute(
             f"SELECT DISTINCT {column} AS v FROM image_view "
             f"WHERE {column} IS NOT NULL ORDER BY {column}"
@@ -207,12 +232,23 @@ class IndexDB:
             values = [v for v in values if v != ""]
             if not values:
                 continue
+            if not self.has_column(column):
+                # This plate has no such column, so nothing in it can match.
+                # Returning no rows (rather than ignoring the constraint) is
+                # what makes "gene = ftsZ" select only the CRISPRi plates in a
+                # mixed session, instead of also returning every antibiotic
+                # image because the filter was quietly dropped.
+                return []
             placeholders = ",".join("?" for _ in values)
             where.append(f"CAST({column} AS TEXT) IN ({placeholders})")
             params.extend(str(v) for v in values)
 
         if search.strip():
-            haystack = ["plate", "well", "channel", *self.metadata_columns]
+            haystack = [
+                c
+                for c in ["plate", "well", "channel", *self.metadata_columns]
+                if self.has_column(c)
+            ]
             clause = " OR ".join(
                 f"CAST(COALESCE({c}, '') AS TEXT) LIKE ? COLLATE NOCASE" for c in haystack
             )

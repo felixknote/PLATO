@@ -32,8 +32,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QPixmap
 
 from ..cache import ThumbnailCache
-from ..index.db import ImageRow
-from .session import Session
+from ..data.index.db import ImageRow
+from ..data.session import Session
 
 ROW_ROLE = Qt.ItemDataRole.UserRole + 1
 

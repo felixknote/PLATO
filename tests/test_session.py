@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from plato.config import load_config
-from plato.gui.session import SOURCE_PLATE, DuplicatePlateError, Session
+from plato.data.session import SOURCE_PLATE, DuplicatePlateError, Session
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "make_demo_data.py"
 

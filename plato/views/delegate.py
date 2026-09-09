@@ -7,7 +7,7 @@ from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from .model import ROW_ROLE
-from .theme import ACCENT, FLAG, TEXT_MUTED
+from ..gui.theme import ACCENT, FLAG, TEXT_MUTED
 
 FLAG_COLOR = QColor(FLAG)
 SELECT_COLOR = QColor(ACCENT)

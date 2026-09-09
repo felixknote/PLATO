@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .session import Session
+from ..data.session import Session
 
 
 class PlatesDialog(QDialog):

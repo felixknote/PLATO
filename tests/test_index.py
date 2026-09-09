@@ -10,7 +10,7 @@ import pytest
 
 from plato.cache import build_thumbnails
 from plato.config import load_config
-from plato.index import IndexDB, build_index
+from plato.data.index import IndexDB, build_index
 from plato.wells import WellParseError, canonical, parse_well
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "make_demo_data.py"
@@ -157,7 +157,7 @@ def test_display_limits_are_shared_across_the_screen(demo: Path) -> None:
 
 
 def test_timepoint_is_derived_from_plate_name() -> None:
-    from plato.gui.session import timepoint_of
+    from plato.data.session import timepoint_of
 
     assert timepoint_of("P13_T1") == "T1"
     assert timepoint_of("P5_T10") == "T10"

@@ -29,7 +29,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_index(args: argparse.Namespace) -> int:
-    from .index import build_index
+    from .data.index import build_index
 
     cfg = _config(args)
     report = build_index(cfg)

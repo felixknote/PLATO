@@ -25,8 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..index.filenames import compile_pattern, parse_files
-from ..index.platemap import read_platemap
+from ..data.index.filenames import compile_pattern, parse_files
+from ..data.index.platemap import read_platemap
 
 NIS_PATTERN = (
     r"^Well(?P<well>[A-P]\d{1,2})_Point(?P<point>[^_]+)_(?P<field>\d+)"

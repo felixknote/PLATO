@@ -19,8 +19,8 @@ from PySide6.QtWidgets import QApplication
 
 from plato.config import load_config
 from plato.gui.main_window import MainWindow
-from plato.gui.session import SOURCE_PLATE, DuplicatePlateError, Session
-from plato.index.db import IndexDB
+from plato.data.session import SOURCE_PLATE, DuplicatePlateError, Session
+from plato.data.index.db import IndexDB
 
 
 def main(config_path: str) -> int:

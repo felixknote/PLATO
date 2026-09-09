@@ -1,5 +1,18 @@
-"""Main window: empty state until data is loaded, then one or two browser
-panels, shortcuts, persisted session state."""
+"""Application shell: an empty state until data is loaded, then the analysis
+arms as tabs.
+
+The window owns no analysis logic of its own. It holds the menu, the status
+bar, the window-level shortcuts and the session, and delegates everything else
+to whichever arm is on screen:
+
+* **Plate Browser** -- the thumbnail grid, two-panel compare and N-way
+  comparison (``views.browser_arm``).
+* **Embedding Explorer** -- UMAP/t-SNE over precomputed features
+  (``views.explorer``).
+
+Both arms read the same ``Session``, so a plate loaded once is available to
+both, and the image viewer opened from either is the same window.
+"""
 
 from __future__ import annotations
 
@@ -14,22 +27,28 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QSplitter,
     QStatusBar,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from .compare_dialog import CompareSetupDialog
-from .compare_view import ComparisonColumn, ComparisonView
+from ..data.session import DuplicatePlateError, Session
+from ..views.browser_arm import BrowserArm
+from ..views.explorer import EmbeddingExplorer
 from .load_dialog import LoadPlateDialog
-from .panel import BrowserPanel
 from .plates_dialog import PlatesDialog
-from .session import DuplicatePlateError, Session
 from .settings import SettingsDialog
 from .theme import TEXT, TEXT_FAINT, TEXT_MUTED
 
 ORGANISATION = "plato"
+
+BROWSER_TAB = 0
+EXPLORER_TAB = 1
+
+# Where the explorer looks for embedding exports on first open. A default, not
+# a requirement -- the Browse button accepts any folder.
+DEFAULT_EMBEDDING_ROOT = Path(r"Z:\Analysis\DINO")
 
 
 class MainWindow(QMainWindow):
@@ -38,11 +57,9 @@ class MainWindow(QMainWindow):
         self.session = session
         self.settings = QSettings(ORGANISATION, "plato")
 
-        self.splitter: QSplitter | None = None
-        self.primary: BrowserPanel | None = None
-        self.secondary: BrowserPanel | None = None
-        # The N-way comparison view; None when not comparing.
-        self.comparison: ComparisonView | None = None
+        self.tabs: QTabWidget | None = None
+        self.browser: BrowserArm | None = None
+        self.explorer: EmbeddingExplorer | None = None
 
         self.setStatusBar(QStatusBar())
         self._build_menu()
@@ -51,7 +68,7 @@ class MainWindow(QMainWindow):
         if session.is_empty:
             self._show_empty_state()
         else:
-            self._build_browser_ui()
+            self._build_tabs()
 
         self.showMaximized()
         self._restore_session()
@@ -81,6 +98,14 @@ class MainWindow(QMainWindow):
         load_button.setDefault(True)
         load_button.clicked.connect(self._load_data)
 
+        # The explorer needs no plate map -- it reads a precomputed embedding
+        # export -- so it is reachable without loading images first. Without
+        # this the empty state is a dead end for anyone who only wants to look
+        # at embedding space.
+        explorer_button = QPushButton("Open Embedding Explorer")
+        explorer_button.setFixedWidth(200)
+        explorer_button.clicked.connect(self._open_explorer_from_empty)
+
         layout = QVBoxLayout()
         layout.setSpacing(10)
         layout.addStretch(1)
@@ -88,6 +113,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(subtitle, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addSpacing(18)
         layout.addWidget(load_button, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(explorer_button, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addSpacing(6)
         layout.addWidget(hint, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(1)
@@ -102,7 +128,12 @@ class MainWindow(QMainWindow):
             return
         if self._add_to_session(dialog.result_config) is None:
             return
-        self._build_browser_ui()
+        self._build_tabs()
+
+    def _open_explorer_from_empty(self) -> None:
+        self._build_tabs(browser_enabled=False)
+        if self.tabs is not None:
+            self.tabs.setCurrentIndex(EXPLORER_TAB)
 
     def _add_plate(self) -> None:
         dialog = LoadPlateDialog(self, title="Add plate")
@@ -140,19 +171,17 @@ class MainWindow(QMainWindow):
         """Push a change in the set of loaded plates through the whole window.
 
         Filters, pooled display limits and the title all derive from which
-        plates are loaded, so a plain refresh() is not enough: it re-queries
-        with a sidebar that cannot name the plate just added.
+        plates are loaded, so a plain refresh() is not enough.
         """
-        for panel in filter(None, (self.primary, self.secondary)):
-            panel.plates_changed()
-        # Rows handed to the comparison view carry session_index values that a
-        # removal invalidates, and its columns were built from the old plate
-        # set either way.
-        self._clear_comparison()
+        if self.browser is not None:
+            self.browser.plates_changed()
         self._update_title()
 
     def _update_title(self) -> None:
         plates = len(self.session.plates)
+        if not plates:
+            self.setWindowTitle("PLATO")
+            return
         suffix = "" if plates == 1 else f" · {plates} plates"
         self.setWindowTitle(f"PLATO — {self.session.count()} images{suffix}")
 
@@ -164,10 +193,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
         if dialog.removed:
             if self.session.is_empty:
-                # Every panel now queries an empty session; the empty state is
-                # the honest screen for that, and rebuilding from scratch on
-                # the next load is cheaper than teaching the panels to be empty.
-                self._teardown_browser_ui()
+                self._teardown_ui()
                 self._show_status("all plates removed")
                 return
             self._plates_changed()
@@ -175,27 +201,73 @@ class MainWindow(QMainWindow):
                 f"{len(self.session.plates)} plates, {self.session.count()} images total"
             )
 
-    def _teardown_browser_ui(self) -> None:
-        self._clear_comparison()
+    def _teardown_ui(self) -> None:
+        if self.browser is not None:
+            self.browser.clear_comparison()
         if self.compare_action.isChecked():
             self.compare_action.setChecked(False)
-        self.splitter = None
-        self.primary = None
-        self.secondary = None
+        self.tabs = None
+        self.browser = None
+        self.explorer = None
         self._show_empty_state()
 
-    # -- browser chrome -------------------------------------------------------
+    # -- tabs ---------------------------------------------------------------
 
-    def _build_browser_ui(self) -> None:
-        if self.splitter is None:
-            self.splitter = QSplitter(Qt.Orientation.Horizontal)
-            self.primary = BrowserPanel(self.session, self)
-            self.primary.status.connect(self._show_status)
-            self.splitter.addWidget(self.primary)
-            self.setCentralWidget(self.splitter)
+    def _build_tabs(self, *, browser_enabled: bool = True) -> None:
+        """Create the tab shell, or refresh it if it already exists."""
+        if self.tabs is not None:
+            if self.browser is not None:
+                self.browser.plates_changed()
+            self._update_title()
+            return
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+
+        if browser_enabled and not self.session.is_empty:
+            self.browser = BrowserArm(self.session, self)
+            self.browser.status.connect(self._show_status)
+            self.browser.panel_shortcuts_enabled.connect(
+                self._set_panel_shortcuts_enabled
+            )
+            self.tabs.addTab(self.browser, "Plate Browser")
         else:
-            self.primary.plates_changed()
+            # A placeholder keeps the explorer at a stable tab index whether or
+            # not images are loaded, so the menu and shortcuts do not have to
+            # care which case they are in.
+            placeholder = QLabel("Load a plate to browse images.")
+            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            placeholder.setStyleSheet(f"color: {TEXT_FAINT};")
+            self.tabs.addTab(placeholder, "Plate Browser")
+
+        work_dir = (
+            self.session.plates[0].cfg.project.work_dir
+            if self.session.plates
+            else Path(".plato")
+        )
+        self.explorer = EmbeddingExplorer(self.session, work_dir, self)
+        self.explorer.status.connect(self._show_status)
+        self.tabs.addTab(self.explorer, "Embedding Explorer")
+
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.setCentralWidget(self.tabs)
         self._update_title()
+
+        if DEFAULT_EMBEDDING_ROOT.is_dir():
+            self.explorer.set_dataset_root(DEFAULT_EMBEDDING_ROOT)
+
+    def _on_tab_changed(self, index: int) -> None:
+        """Only the browser wants the grid's single-key shortcuts.
+
+        They are window-level, so they would otherwise fire while the explorer
+        is on screen -- where R, 0-5 and Space mean nothing and Space would
+        flag an image the user cannot see.
+        """
+        self._set_panel_shortcuts_enabled(
+            index == BROWSER_TAB and self.browser is not None
+        )
+        for action in self._browser_actions:
+            action.setEnabled(index == BROWSER_TAB and self.browser is not None)
 
     def _build_menu(self) -> None:
         data_menu = self.menuBar().addMenu("&Data")
@@ -241,6 +313,18 @@ class MainWindow(QMainWindow):
         self.blind_action.toggled.connect(self.set_blind)
         view_menu.addAction(self.blind_action)
 
+        view_menu.addSeparator()
+        browser_tab = QAction("Plate Browser", self)
+        browser_tab.setShortcut("Ctrl+1")
+        browser_tab.triggered.connect(lambda: self._select_tab(BROWSER_TAB))
+        view_menu.addAction(browser_tab)
+
+        explorer_tab = QAction("Embedding Explorer", self)
+        explorer_tab.setShortcut("Ctrl+2")
+        explorer_tab.triggered.connect(lambda: self._select_tab(EXPLORER_TAB))
+        view_menu.addAction(explorer_tab)
+
+        view_menu.addSeparator()
         settings_action = QAction("Settings…", self)
         settings_action.triggered.connect(self.open_settings)
         view_menu.addAction(settings_action)
@@ -249,6 +333,19 @@ class MainWindow(QMainWindow):
         keys = QAction("Keyboard shortcuts", self)
         keys.triggered.connect(self.show_shortcuts)
         help_menu.addAction(keys)
+
+        # Actions that only mean something on the browser tab, greyed out
+        # elsewhere rather than silently doing nothing.
+        self._browser_actions = [
+            self.compare_action,
+            compare_by,
+            close_compare,
+            self.blind_action,
+        ]
+
+    def _select_tab(self, index: int) -> None:
+        if self.tabs is not None and index < self.tabs.count():
+            self.tabs.setCurrentIndex(index)
 
     def _build_shortcuts(self) -> None:
         def on_active(action: str, *args) -> None:
@@ -274,12 +371,12 @@ class MainWindow(QMainWindow):
         ]
 
     def _set_panel_shortcuts_enabled(self, enabled: bool) -> None:
-        """Silence the grid's keys while the comparison view owns the window.
+        """Silence the grid's keys while something else owns the window.
 
         These are window-level shortcuts, so they fire ahead of the focused
-        widget's keyPressEvent. The two sets overlap -- 0 clears a rating in
-        the grid and resets zoom in the comparison -- so the grid's must be
-        switched off for the comparison to receive its own keys at all.
+        widget's keyPressEvent. Two things need them off: the comparison view,
+        whose own keys overlap (0 resets zoom there, clears a rating here), and
+        the explorer tab, where none of them apply.
         """
         for shortcut in self._panel_shortcuts:
             shortcut.setEnabled(enabled)
@@ -287,115 +384,36 @@ class MainWindow(QMainWindow):
     def _show_status(self, message: str) -> None:
         self.statusBar().showMessage(message, 4000)
 
-    # -- panels -----------------------------------------------------------
+    # -- browser delegation -------------------------------------------------
 
-    def _active(self) -> BrowserPanel | None:
-        """The panel keyboard actions apply to, or None if there is not one.
-
-        Returns None while the comparison view is open: its own keys overlap
-        the panel's (0 resets zoom there, clears a rating here) and the
-        window-level shortcuts would otherwise win and act on a hidden grid.
-        """
-        if self.comparison is not None:
-            return None
-        if self.secondary is not None and self.secondary.view.hasFocus():
-            return self.secondary
-        return self.primary
+    def _active(self):
+        return self.browser.active_panel() if self.browser is not None else None
 
     def _open_current(self) -> None:
-        panel = self._active()
-        if panel is not None:
-            panel.open_viewer(panel.current_index())
+        if self.browser is not None:
+            self.browser.open_current()
 
     def set_compare(self, enabled: bool) -> None:
-        if self.primary is None or self.splitter is None:
-            return
-        if enabled and self.secondary is None:
-            self.secondary = BrowserPanel(self.session, self)
-            self.secondary.status.connect(self._show_status)
-            self.secondary.set_blind(self.blind_action.isChecked())
-            self.splitter.addWidget(self.secondary)
-            self.splitter.setSizes([1, 1])
-        elif not enabled and self.secondary is not None:
-            self.secondary.setParent(None)
-            self.secondary.deleteLater()
-            self.secondary = None
+        if self.browser is not None:
+            self.browser.set_compare(enabled)
 
     def compare_by_variable(self) -> None:
-        """One panel per value of a chosen variable, all sharing a base condition."""
-        if self.session.is_empty or self.splitter is None:
-            return
-        dialog = CompareSetupDialog(self.session, self)
-        if dialog.exec() != CompareSetupDialog.DialogCode.Accepted:
+        if self.browser is None:
             return
 
-        column = dialog.variable_column()
-        values = dialog.selected_values()
-        base = dialog.base_filter()
-        if not column or not values:
-            return
+        def turn_off_two_panel() -> None:
+            if self.compare_action.isChecked():
+                self.compare_action.setChecked(False)
 
-        self._clear_comparison()
-        # The two-panel compare and the N-panel compare are the same screen
-        # real estate; leaving both on would stack unrelated panels.
-        if self.compare_action.isChecked():
-            self.compare_action.setChecked(False)
-
-        limits = self.session.display_limits()
-        columns = []
-        for value in values:
-            rows = self.session.query({**base, column: [value]})
-            col = ComparisonColumn(f"{self.session.label(column)}: {value}", rows)
-            # Same fixed per-channel limits the grid uses, so a difference
-            # between columns is a difference in the sample, not in scaling.
-            channel = rows[0].channel if rows else None
-            col.set_levels(limits.get(channel or "_"))
-            columns.append(col)
-
-        self.comparison = ComparisonView(self)
-        self.comparison.status.connect(self._show_status)
-        self.comparison.export_button.clicked.connect(self._export_comparison)
-        self.comparison.set_columns(columns)
-        self.splitter.addWidget(self.comparison)
-        self._set_panel_shortcuts_enabled(False)
-        self.comparison.setFocus(Qt.FocusReason.OtherFocusReason)
-
-        if self.primary is not None:
-            self.primary.setVisible(False)
-        base_text = ", ".join(f"{k}={v[0]}" for k, v in base.items()) or "all data"
-        self._show_status(f"comparing {column} across {len(values)} values — {base_text}")
-
-    def _export_comparison(self) -> None:
-        """Export exactly the images currently on screen, one per slice."""
-        if self.comparison is None:
-            return
-        rows = self.comparison.visible_rows()
-        if not rows:
-            QMessageBox.information(self, "Export", "Nothing on screen to export.")
-            return
-        # Reuses the panel's export path so format choice, scale-bar baking and
-        # shared contrast behave identically to exporting from the grid.
-        exporter = self.primary or BrowserPanel(self.session, self)
-        exporter.export_rows(rows)
-
-    def _clear_comparison(self) -> None:
-        if self.comparison is not None:
-            self.comparison.setParent(None)
-            self.comparison.deleteLater()
-            self.comparison = None
-            self._set_panel_shortcuts_enabled(True)
-        if self.primary is not None:
-            self.primary.setVisible(True)
+        self.browser.compare_by_variable(on_two_panel_compare_off=turn_off_two_panel)
 
     def exit_comparison(self) -> None:
-        if self.comparison is None:
-            return
-        self._clear_comparison()
-        self._show_status("comparison closed")
+        if self.browser is not None:
+            self.browser.exit_comparison()
 
     def set_blind(self, enabled: bool) -> None:
-        for panel in filter(None, (self.primary, self.secondary)):
-            panel.set_blind(enabled)
+        if self.browser is not None:
+            self.browser.set_blind(enabled)
         self._show_status(
             "Blinded review on — metadata hidden, order randomised"
             if enabled
@@ -417,8 +435,7 @@ class MainWindow(QMainWindow):
         # Field names are the union across every row, not row 0's keys: plates
         # in one session can carry different plate-map columns (one screen's
         # "antibiotic" is another's "compound"), and DictWriter raises on any
-        # key it was not told about. Taking the union keeps a mixed session
-        # exportable, with blanks where a plate has no such column.
+        # key it was not told about.
         fieldnames: list[str] = []
         for row in rows:
             for key in row:
@@ -437,6 +454,9 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Keyboard shortcuts",
+            "Tabs\n"
+            "  Ctrl+1      plate browser\n"
+            "  Ctrl+2      embedding explorer\n\n"
             "Browser\n"
             "  Arrows      move between thumbnails\n"
             "  Enter       open full resolution\n"
@@ -447,6 +467,10 @@ class MainWindow(QMainWindow):
             "  Ctrl+Shift+D  compare along a variable (one panel per value)\n"
             "  Ctrl+Shift+W  close comparison\n"
             "  Ctrl+B      blinded review\n\n"
+            "Embedding explorer\n"
+            "  hover       preview the original image\n"
+            "  click       open it at full resolution\n"
+            "  scroll      zoom · drag  pan\n\n"
             "Comparison view\n"
             "  ←/→         step the selected column (click one to select)\n"
             "  scroll      zoom all columns, centred on the cursor\n"
@@ -465,10 +489,10 @@ class MainWindow(QMainWindow):
 
     def _restore_session(self) -> None:
         search = self.settings.value("search", "")
-        if search and self.primary is not None:
-            self.primary.search.setText(str(search))
+        if search and self.browser is not None and self.browser.primary is not None:
+            self.browser.primary.search.setText(str(search))
 
     def closeEvent(self, event) -> None:  # noqa: ANN001, N802
-        if self.primary is not None:
-            self.settings.setValue("search", self.primary.search.text())
+        if self.browser is not None and self.browser.primary is not None:
+            self.settings.setValue("search", self.browser.primary.search.text())
         super().closeEvent(event)

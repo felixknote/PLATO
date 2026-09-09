@@ -24,9 +24,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..index.db import ImageRow
+from ..data.index.db import ImageRow
 from .scalebar import bar_length_um
-from .session import Session
+from ..data.session import Session
 from .settings import get_nm_per_pixel, get_scale_bar_fraction
 
 pg.setConfigOption("imageAxisOrder", "row-major")

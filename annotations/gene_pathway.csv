@@ -1,0 +1,48 @@
+gene,pathway
+# Gene -> pathway / target class for the CRISPRi arm.
+#
+# THIS FILE IS YOURS TO EDIT. It ships with the pathway column BLANK on
+# purpose: nothing in the dataset records which pathway a gene belongs to, and
+# PLATO will not invent one. Until you fill a row in, that gene's points read
+# as "unannotated" and are drawn in grey.
+#
+# To make the CRISPRi and ABx arms share one colour space -- which is what
+# makes "does this knockdown sit where that antibiotic sits?" a question you
+# can answer by eye -- use the SAME class names your MoA table already uses:
+#
+#   Cell wall (PBP 1)   Cell wall (PBP 2)   Cell wall (PBP 3)
+#   Gyrase              Ribosome            Membrane integrity
+#   RNA polymerase      DNA synthesis       Control
+#
+# Any other name works too; it just gets its own colour.
+# Lines starting with # are ignored, as are blank pathway cells.
+ACE-1 NC,
+MG1655 NC,
+dnaB,
+dnaE,
+folA,
+folP,
+ftsI,
+ftsZ,
+gyrA,
+gyrB,
+lptA,
+lptC,
+lpxA,
+lpxC,
+mrcA,
+mrcB,
+mrdA,
+msbA,
+murA,
+murC,
+parC,
+parE,
+rplA,
+rplC,
+rpoA,
+rpoB,
+rpsA,
+rpsL,
+secA,
+secY,

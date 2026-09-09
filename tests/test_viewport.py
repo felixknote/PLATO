@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from plato.gui.compare_view import Viewport
+from plato.views.compare_view import Viewport
 
 
 def test_starts_showing_the_whole_image() -> None:

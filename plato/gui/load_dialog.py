@@ -32,9 +32,10 @@ from ..config import (
     ProjectConfig,
     ThumbnailsConfig,
 )
-from ..index import build_index
-from ..index.platemap import plate_from_filename
+from ..data.index import build_index
+from ..data.index.platemap import plate_from_filename
 from .detect import WELL_ONLY_PATTERN, compile_or_none, detect_pattern, detect_platemap_layout
+from .progress import run_with_progress
 
 FALLBACK_PATTERN = WELL_ONLY_PATTERN
 
@@ -141,8 +142,13 @@ class LoadPlateDialog(QDialog):
             return
 
         cfg = self._build_config(pattern, layout_guess)
-        try:
-            report = build_index(cfg, verbose=False)
+
+        # Indexing and thumbnailing are minutes of work on a full plate, so
+        # they run on a worker thread behind a progress bar rather than
+        # freezing the window until they finish.
+        def job(report_progress):
+            report_progress(0, 0, "indexing filenames and plate map…")
+            built = build_index(cfg, verbose=False)
             build_thumbnails(
                 cfg.db_path,
                 cfg.thumb_db_path,
@@ -150,9 +156,17 @@ class LoadPlateDialog(QDialog):
                 percentiles=cfg.thumbnails.percentiles,
                 sample_size=cfg.thumbnails.sample_size,
                 verbose=False,
+                progress=report_progress,
             )
-        except (ValueError, RuntimeError, FileNotFoundError) as exc:
-            QMessageBox.critical(self, "Load data", f"Indexing failed:\n{exc}")
+            return built
+
+        report, error, cancelled = run_with_progress(
+            job, f"Loading {cfg.project.name}", self
+        )
+        if cancelled:
+            return
+        if error is not None:
+            QMessageBox.critical(self, "Load data", f"Indexing failed:\n{error}")
             return
 
         if not report.ok:

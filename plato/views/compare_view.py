@@ -29,8 +29,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..cache import read_plane, scale_to_uint8
-from ..index.db import ImageRow
-from .theme import ACCENT, TEXT, TEXT_MUTED
+from ..data.index.db import ImageRow
+from ..gui.theme import ACCENT, TEXT, TEXT_MUTED
 
 # Decode target for the comparison columns. Well above the ~900px a column
 # actually gets on a wide screen, so the displayed image is still downscaled

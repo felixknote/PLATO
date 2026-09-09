@@ -15,8 +15,8 @@ from typing import Any
 
 import pandas as pd
 
-from ..config import Config
-from ..wells import WellParseError, parse_well
+from ...config import Config
+from ...wells import WellParseError, parse_well
 from . import db
 from .filenames import ImageRecord, parse_files
 from .platemap import plate_from_filename, read_platemap

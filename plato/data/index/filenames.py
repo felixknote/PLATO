@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..wells import Well, WellParseError, parse_well
+from ...wells import Well, WellParseError, parse_well
 
 REQUIRED_GROUPS = {"well"}
 # `field` = position within a well (NIS "Point" index, or site/FOV).
