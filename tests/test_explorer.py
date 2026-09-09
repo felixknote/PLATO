@@ -327,3 +327,32 @@ def test_real_images_resolve():
     assert resolver is not None
     sample = frame.sample(n=8, random_state=0)
     assert all(resolver.path_for(row) is not None for _, row in sample.iterrows())
+
+
+# -- image resolution regressions -------------------------------------------
+
+
+def test_resolver_prefers_a_root_that_actually_resolves(tmp_path):
+    """Resolution must be proven against the frame, not guessed from paths.
+
+    The first version probed before the frame existed and only looked at
+    loaded plates' directories, so the explorer silently had no previews.
+    """
+    # A decoy root that exists but holds nothing this dataset refers to.
+    decoy = tmp_path / "decoy"
+    (decoy / "ABx_P1").mkdir(parents=True)
+    (decoy / "ABx_P1" / "unrelated.tiff").write_bytes(b"x")
+
+    real = tmp_path / "real"
+    (real / "ABx_P1").mkdir(parents=True)
+    for i in range(0, 120, 2):
+        (real / "ABx_P1" / f"img_{i:04d}.tiff").write_bytes(b"x")
+
+    dataset = load_dataset(_write_dataset(tmp_path / "ds"))
+    frame, _ = build_frame(dataset)
+    abx = frame[frame["plate"] == "ABx_P1"]
+
+    assert ImageResolver.detect(decoy, abx) is None
+    resolver = ImageResolver.detect(real, abx)
+    assert resolver is not None
+    assert resolver.path_for(abx.iloc[0]) is not None
