@@ -295,9 +295,15 @@ Z:\Analysis\DINO\<dataset>    features_all.npz          embeddings: (N, D) float
     metadata.json             optional; model name, crop size
 ```
 
-**Projections.** UMAP and t-SNE, defaulting to the recipe already used for
-these features elsewhere in the lab (cosine metric, `n_neighbors=500`,
-`min_dist=1.0`, fixed seed) after an L2 normalise and a PCA to 50 dimensions.
+**Projections.** UMAP and t-SNE. Parameters are preset from the dataset when
+one loads, rather than fixed: `n_neighbors` scales with the point count
+(clamped to 15-500, so it lands on the lab's tuned 500 for a 30k-row DINO
+export and on something sane for a few hundred computed descriptors), and
+subsampling only engages above ~40k points. Geometry follows what the vectors
+are, not a preference — learned embeddings get an L2 normalise, PCA to 50
+dimensions and a cosine metric; hand-computed descriptors are already
+standardised per feature and stay Euclidean with no PCA. Every value is
+editable, and the seed is fixed.
 Each result is cached under `.plato/projections/`, keyed by a fingerprint of
 the vectors plus every parameter that changes the output — so switching
 method, or reopening a dataset, is instant, and changing a parameter computes

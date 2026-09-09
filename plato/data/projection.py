@@ -71,6 +71,55 @@ class ProjectionParams:
         return "_".join(parts).replace(" ", "").replace("/", "-")
 
 
+def suggest(n_points: int, *, learned: bool = True) -> ProjectionParams:
+    """Sensible starting parameters for a dataset of this size and kind.
+
+    There is no single right default. ``n_neighbors=500`` is the tuned value
+    for tens of thousands of DINO vectors, where neighbourhoods are large and
+    the question is global structure; applied to a few hundred points it
+    exceeds the sample and every point becomes a neighbour of every other,
+    which erases exactly the local structure a projection exists to show.
+
+    So the defaults scale:
+
+    * **n_neighbors** ~ 1.5% of the points, clamped to [15, 500]. That lands
+      on the tuned 500 for the 30k-row exports and on something sane for a
+      few hundred computed descriptors.
+    * **perplexity** ~ n/100, clamped to [10, 50]; openTSNE additionally
+      requires it below n/3, which the runner enforces.
+    * **subsample** kicks in only above ~40k points, where a full UMAP starts
+      costing more minutes than the first look is worth.
+    * **PCA** is skipped for low-dimensional inputs -- reducing 31 image
+      descriptors to 50 components does nothing but cost a fit.
+
+    ``learned`` says whether the vectors are learned embeddings (cosine
+    geometry, worth normalising) or hand-computed descriptors, which are
+    already standardised per feature and live in a Euclidean space.
+    """
+    n_points = max(1, int(n_points))
+
+    neighbours = int(round(n_points * 0.015))
+    neighbours = max(15, min(500, neighbours))
+    # Never at or above the sample size: UMAP clamps it anyway, but a value
+    # that has to be clamped is not a sensible default to show the user.
+    neighbours = min(neighbours, max(2, n_points - 1))
+
+    perplexity = float(max(10, min(50, n_points // 100)))
+
+    max_points = None if n_points <= 40_000 else 20_000
+
+    return ProjectionParams(
+        method=UMAP,
+        normalize=learned,
+        pca_components=DEFAULT_PCA_COMPONENTS if learned else 0,
+        metric="cosine" if learned else "euclidean",
+        n_neighbors=neighbours,
+        min_dist=1.0 if learned else 0.1,
+        perplexity=perplexity,
+        max_points=max_points,
+    )
+
+
 @dataclass(slots=True)
 class ProjectionResult:
     """2-D coordinates for a (possibly subsampled) set of embedding rows."""

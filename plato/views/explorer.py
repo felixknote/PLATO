@@ -78,7 +78,15 @@ from ..data.locations import (
     guess_data_library,
     set_root,
 )
-from ..data.projection import METHODS, TSNE, UMAP, ProjectionCache, ProjectionParams, project
+from ..data.projection import (
+    METHODS,
+    TSNE,
+    UMAP,
+    ProjectionCache,
+    ProjectionParams,
+    project,
+    suggest,
+)
 from ..gui.theme import BORDER, SURFACE, TEXT, TEXT_FAINT, TEXT_MUTED
 from ..gui.viewer import ImageWindow
 from .palette import UNKNOWN_COLOUR, colours_for, is_unknown, sort_values
@@ -198,6 +206,8 @@ class EmbeddingExplorer(QWidget):
         self.ambiguous_roots: list[str] = []
         # True while the background root hunt is running.
         self._resolving = False
+        # Parameters suggested for the loaded dataset; the controls start here.
+        self._suggested: ProjectionParams | None = None
         self._windows: list[ImageWindow] = []
         self._busy = False
         self._cancelled = False
@@ -279,13 +289,24 @@ class EmbeddingExplorer(QWidget):
         self.method_box = QComboBox()
         self.method_box.addItems(METHODS)
 
+        # Editable, because the suggested value scales with the dataset and
+        # will usually not be one of the presets.
         self.neighbours_box = QComboBox()
+        self.neighbours_box.setEditable(True)
         self.neighbours_box.addItems(["15", "50", "100", "200", "500"])
-        self.neighbours_box.setCurrentText("500")
+        self.neighbours_box.setToolTip(
+            "How much of the neighbourhood UMAP preserves.\n"
+            "Low values emphasise local structure, high values global shape.\n"
+            "Set from the dataset size when one is loaded."
+        )
 
         self.perplexity_box = QComboBox()
+        self.perplexity_box.setEditable(True)
         self.perplexity_box.addItems(["10", "30", "50", "100"])
-        self.perplexity_box.setCurrentText("30")
+        self.perplexity_box.setToolTip(
+            "t-SNE's effective neighbourhood size.\n"
+            "Must stay below a third of the point count, which is enforced."
+        )
 
         # Subsampling. A UMAP of 30k x 1024 is minutes; 5k is seconds, and for
         # judging whether two conditions overlap a random subsample answers the
@@ -725,6 +746,7 @@ class EmbeddingExplorer(QWidget):
         self.resolver = self._start_resolving_images(self.frame)
         self._update_source_label()
         self.result = None
+        self.apply_suggested_params()
         self._rebuild_colour_options()
         self._rebuild_filters()
         self._update_points_hint()
@@ -793,6 +815,7 @@ class EmbeddingExplorer(QWidget):
         self.resolver = resolver
         self._update_source_label()
         self.result = None
+        self.apply_suggested_params()
         self._rebuild_colour_options()
         self._rebuild_filters()
         self._update_points_hint()
@@ -845,6 +868,7 @@ class EmbeddingExplorer(QWidget):
         self.resolver = self._start_resolving_images(self.frame)
         self._update_source_label()
         self.result = None
+        self.apply_suggested_params()
         self._rebuild_colour_options()
         self._rebuild_filters()
         self._update_points_hint()
@@ -976,6 +1000,35 @@ class EmbeddingExplorer(QWidget):
 
     # -- controls ---------------------------------------------------------
 
+    def apply_suggested_params(self) -> None:
+        """Preset the projection controls for the dataset just loaded.
+
+        Defaults that ignore the data are wrong for most of it: the tuned
+        n_neighbors=500 suits a 30k-row DINO export and exceeds the sample
+        entirely for a few hundred computed descriptors. See
+        ``plato.data.projection.suggest``.
+        """
+        if self.dataset is None:
+            return
+        learned = not bool(self.dataset.run_info.get("computed"))
+        params = suggest(self.dataset.n_points, learned=learned)
+        self._suggested = params
+
+        for box, value in (
+            (self.neighbours_box, str(params.n_neighbors)),
+            (self.perplexity_box, str(int(params.perplexity))),
+        ):
+            box.blockSignals(True)
+            box.setCurrentText(value)
+            box.blockSignals(False)
+
+        self.max_points_box.blockSignals(True)
+        self.max_points_box.setCurrentText(
+            "all" if params.max_points is None else str(params.max_points)
+        )
+        self.max_points_box.blockSignals(False)
+        self._update_points_hint()
+
     def _rebuild_colour_options(self) -> None:
         current = self.colour_box.currentData()
         self.colour_box.blockSignals(True)
@@ -1026,12 +1079,37 @@ class EmbeddingExplorer(QWidget):
     # -- projection -------------------------------------------------------
 
     def _params(self) -> ProjectionParams:
-        text = self.max_points_box.currentText()
+        """The controls, over the suggestion's non-tunable parts.
+
+        Metric, normalisation and PCA depth are not exposed: they follow from
+        what the vectors ARE (learned embeddings want cosine geometry after
+        an L2 normalise; hand-computed descriptors are already standardised
+        and live in a Euclidean space), not from a preference.
+        """
+        base = self._suggested or ProjectionParams()
+
+        def _number(box, fallback):
+            try:
+                return type(fallback)(box.currentText().strip())
+            except (TypeError, ValueError):
+                # An editable combo can hold anything the user typed.
+                return fallback
+
+        text = self.max_points_box.currentText().strip()
+        try:
+            max_points = None if text == "all" else int(text)
+        except ValueError:
+            max_points = base.max_points
+
         return ProjectionParams(
             method=self.method_box.currentText(),
-            n_neighbors=int(self.neighbours_box.currentText()),
-            perplexity=float(self.perplexity_box.currentText()),
-            max_points=None if text == "all" else int(text),
+            normalize=base.normalize,
+            pca_components=base.pca_components,
+            metric=base.metric,
+            n_neighbors=max(2, _number(self.neighbours_box, base.n_neighbors)),
+            min_dist=base.min_dist,
+            perplexity=max(5.0, _number(self.perplexity_box, base.perplexity)),
+            max_points=max_points,
         )
 
     def compute(self) -> None:

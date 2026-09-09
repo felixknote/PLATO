@@ -625,3 +625,54 @@ def test_projection_reports_progress():
     assert seen, "no progress was reported"
     assert seen == sorted(seen)
     assert seen[-1] == pytest.approx(1.0)
+
+
+# -- suggested parameters ---------------------------------------------------
+
+
+def test_suggested_neighbours_scale_with_the_dataset():
+    """The tuned 500 suits a 30k export and destroys a small one."""
+    from plato.data.projection import suggest
+
+    assert suggest(36_288).n_neighbors == 500
+    assert suggest(24_192).n_neighbors < 500
+    small = suggest(300, learned=False)
+    assert small.n_neighbors == 15
+    # Never at or above the sample: every point being everyone's neighbour
+    # erases the local structure a projection exists to show.
+    for n in (20, 50, 300, 5_000):
+        assert suggest(n).n_neighbors < n
+
+
+def test_suggested_geometry_follows_the_vector_kind():
+    """Learned embeddings want cosine after an L2 normalise; hand-computed
+    descriptors are already standardised and live in a Euclidean space."""
+    from plato.data.projection import suggest
+
+    learned = suggest(20_000, learned=True)
+    assert learned.metric == "cosine"
+    assert learned.normalize
+    assert learned.pca_components > 0
+
+    computed = suggest(2_000, learned=False)
+    assert computed.metric == "euclidean"
+    assert not computed.normalize
+    # Reducing 31 descriptors to 50 components does nothing but cost a fit.
+    assert computed.pca_components == 0
+
+
+def test_suggested_perplexity_stays_usable():
+    from plato.data.projection import suggest
+
+    for n in (50, 500, 5_000, 50_000):
+        perplexity = suggest(n).perplexity
+        assert 10 <= perplexity <= 50
+        # openTSNE needs perplexity < n/3, which the runner also enforces.
+        assert perplexity < max(5, n / 3)
+
+
+def test_subsampling_only_kicks_in_when_it_has_to():
+    from plato.data.projection import suggest
+
+    assert suggest(30_000).max_points is None
+    assert suggest(200_000).max_points == 20_000
