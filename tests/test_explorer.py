@@ -676,3 +676,52 @@ def test_subsampling_only_kicks_in_when_it_has_to():
 
     assert suggest(30_000).max_points is None
     assert suggest(200_000).max_points == 20_000
+
+
+def test_deterministic_flag_changes_the_cache_key():
+    """A seeded run and a threaded run are different results, not one."""
+    from plato.data.projection import ProjectionParams
+
+    assert (
+        ProjectionParams(deterministic=True).key()
+        != ProjectionParams(deterministic=False).key()
+    )
+
+
+def test_suggested_params_favour_speed():
+    """UMAP is single-threaded once seeded, so exploration defaults to fast."""
+    from plato.data.projection import suggest
+
+    assert suggest(20_000).deterministic is False
+
+
+def test_deterministic_runs_repeat_exactly():
+    vectors = np.random.default_rng(0).normal(size=(150, 12)).astype(np.float32)
+    params = ProjectionParams(n_neighbors=10, pca_components=6, deterministic=True)
+    first = project(vectors, params)
+    second = project(vectors, params)
+    np.testing.assert_allclose(first.coords, second.coords)
+
+
+def test_parallel_runs_preserve_cluster_structure():
+    """Threading costs the coordinate frame, not the clusters.
+
+    An unseeded UMAP may rotate or mirror the layout between runs, so the
+    coordinates differ; what must not differ is which points group together,
+    since that is what any conclusion rests on.
+    """
+    pytest.importorskip("sklearn")
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import adjusted_rand_score
+
+    rng = np.random.default_rng(0)
+    centres = rng.normal(size=(4, 20)) * 6
+    labels = rng.integers(0, 4, size=600)
+    vectors = (centres[labels] + rng.normal(size=(600, 20))).astype(np.float32)
+
+    params = ProjectionParams(n_neighbors=25, pca_components=10, deterministic=False)
+    first = project(vectors, params).coords
+    second = project(vectors, params).coords
+
+    grouping = lambda coords: KMeans(4, n_init=10, random_state=0).fit_predict(coords)
+    assert adjusted_rand_score(grouping(first), grouping(second)) > 0.9

@@ -328,6 +328,16 @@ class EmbeddingExplorer(QWidget):
         self.points_hint = QLabel("")
         self.points_hint.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 10px;")
 
+        self.deterministic_box = QCheckBox("Reproducible (slower)")
+        self.deterministic_box.setToolTip(
+            "UMAP cannot use more than one core once its seed is fixed, so "
+            "this trades ~10x speed for an identical layout every run.\n"
+            "The cluster structure is the same either way — only the "
+            "orientation of the plot changes — so leave it off while "
+            "exploring and turn it on for a figure you need to regenerate "
+            "exactly. t-SNE is reproducible and threaded regardless."
+        )
+
         self.run_button = QPushButton("Compute projection")
         self.run_button.setDefault(True)
         self.run_button.clicked.connect(self.compute)
@@ -365,6 +375,7 @@ class EmbeddingExplorer(QWidget):
         points_widget = QWidget()
         points_widget.setLayout(points_column)
         projection_form.addRow("Subsample", points_widget)
+        projection_form.addRow(self.deterministic_box)
         projection_form.addRow(self.run_button)
         projection_form.addRow(self.progress_bar)
         projection_form.addRow(self.progress_label)
@@ -1110,6 +1121,7 @@ class EmbeddingExplorer(QWidget):
             min_dist=base.min_dist,
             perplexity=max(5.0, _number(self.perplexity_box, base.perplexity)),
             max_points=max_points,
+            deterministic=self.deterministic_box.isChecked(),
         )
 
     def compute(self) -> None:

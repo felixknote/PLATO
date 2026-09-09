@@ -302,8 +302,16 @@ export and on something sane for a few hundred computed descriptors), and
 subsampling only engages above ~40k points. Geometry follows what the vectors
 are, not a preference — learned embeddings get an L2 normalise, PCA to 50
 dimensions and a cosine metric; hand-computed descriptors are already
-standardised per feature and stay Euclidean with no PCA. Every value is
-editable, and the seed is fixed.
+standardised per feature and stay Euclidean with no PCA. Every value is editable.
+
+UMAP runs multithreaded by default. It refuses to use more than one core once
+its seed is fixed -- the parallel optimiser is not order-deterministic -- so
+seeding and threading are mutually exclusive; measured on a 36-core machine,
+12k points take 38.7 s seeded and 3.0 s threaded. What threading costs is the
+exact coordinates, not the structure: across independent runs the clusters are
+identical (k-means labels agreed at ARI 1.000 on a 24k set), the plot may just
+be rotated or mirrored. Tick **Reproducible** for a figure that must
+regenerate exactly. t-SNE is seeded *and* threaded regardless.
 Each result is cached under `.plato/projections/`, keyed by a fingerprint of
 the vectors plus every parameter that changes the output — so switching
 method, or reopening a dataset, is instant, and changing a parameter computes

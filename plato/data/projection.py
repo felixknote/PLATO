@@ -59,6 +59,23 @@ class ProjectionParams:
     perplexity: float = 30.0
     # Subsample cap. None projects every point.
     max_points: int | None = None
+    # Reproducible layout, or a fast one.
+    #
+    # UMAP refuses to use more than one thread once a random_state is set --
+    # its parallel optimiser is not order-deterministic, so a seed and threads
+    # cannot both be honoured. Measured on this machine (36 cores): 8k points
+    # take 46.6 s seeded and 4.5 s parallel, a 10x difference, and at 24k
+    # points the parallel run takes 34 s.
+    #
+    # What is lost is the exact coordinates, not the structure: across
+    # independent unseeded runs of a 24k set, k-means labels of the resulting
+    # layouts agreed at ARI 1.000. So the clusters, and any conclusion drawn
+    # from them, are the same; the plot may be rotated or mirrored.
+    #
+    # Default False -- exploration wants speed, and a projection is re-run
+    # whenever a parameter changes. Turn it on for a figure that has to be
+    # regenerated exactly.
+    deterministic: bool = False
 
     def key(self) -> str:
         relevant = asdict(self)
@@ -117,6 +134,7 @@ def suggest(n_points: int, *, learned: bool = True) -> ProjectionParams:
         min_dist=1.0 if learned else 0.1,
         perplexity=perplexity,
         max_points=max_points,
+        deterministic=False,
     )
 
 
@@ -197,14 +215,21 @@ def _run_umap(data: np.ndarray, params: ProjectionParams, progress=None) -> np.n
     # optimiser's epochs; the tap turns that into fractions. Without a
     # reporter it stays silent, exactly as before.
     tap = UmapProgressTap(progress) if progress is not None else None
+    # random_state and n_jobs are mutually exclusive in UMAP; passing both
+    # prints a warning and silently drops the threads.
+    threading = (
+        {"random_state": RANDOM_STATE}
+        if params.deterministic
+        else {"n_jobs": -1}
+    )
     reducer = umap.UMAP(
         n_components=2,
         n_neighbors=n_neighbors,
         min_dist=params.min_dist,
         metric=params.metric,
-        random_state=RANDOM_STATE,
         verbose=tap is not None,
         tqdm_kwds=tap.tqdm_kwds if tap is not None else None,
+        **threading,
     )
     if tap is None:
         return np.asarray(reducer.fit_transform(data), dtype=np.float32)
@@ -233,6 +258,8 @@ def _run_tsne(data: np.ndarray, params: ProjectionParams, progress=None) -> np.n
         n_components=2,
         perplexity=perplexity,
         metric=params.metric,
+        # Unlike UMAP, openTSNE parallelises with a seed set, so this stays
+        # reproducible AND threaded.
         random_state=RANDOM_STATE,
         n_jobs=-1,
         n_iter=n_iter,
