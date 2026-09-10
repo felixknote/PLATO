@@ -54,7 +54,14 @@ from ..data.embeddings import (
     discover_datasets,
     load_dataset,
 )
-from ..data.workspace import SOURCE_COMPUTED, SOURCE_EXPORT, EmbeddingEntry, Workspace
+from ..data.workspace import (
+    DATASET_COLUMN,
+    SOURCE_COMPUTED,
+    SOURCE_EXPORT,
+    SOURCE_JOINT,
+    EmbeddingEntry,
+    Workspace,
+)
 from ..data.explorer_model import (
     CONCENTRATION,
     CONDITION,
@@ -434,9 +441,22 @@ class EmbeddingExplorer(QWidget):
         self.open_row_widget.setLayout(open_row)
         self.open_row_widget.hide()
 
+        # Projecting several open embeddings together as one fit, so position
+        # is actually comparable between them -- see joint_projection.py for
+        # why colouring by dataset over separately-fit layouts is not that.
+        self.combine_button = QPushButton("Combine…")
+        self.combine_button.setToolTip(
+            "Project two or more open embeddings together as one UMAP/t-SNE "
+            "fit, so their positions are directly comparable.\n"
+            "Only embeddings with matching dimensionality can be combined."
+        )
+        self.combine_button.clicked.connect(self._combine_embeddings)
+        self.combine_button.hide()
+
         source_row.addWidget(self.dataset_box)
         source_row.addWidget(browse)
         source_row.addWidget(self.open_row_widget)
+        source_row.addWidget(self.combine_button)
         source_widget = QWidget()
         source_widget.setLayout(source_row)
 
@@ -1030,8 +1050,16 @@ class EmbeddingExplorer(QWidget):
         if loaded and self.workspace.current is not None:
             # Land on the last one loaded rather than whatever was current
             # before -- that is what "just loaded" means to the user.
-            self.open_box.setCurrentIndex(self.open_box.count() - 1)
-            self._on_open_changed()
+            # _switch_to directly: _load_embedding_directory already left
+            # _active_key on the last entry it loaded, so this is usually a
+            # no-op, but calling it explicitly rather than through the
+            # combobox signal is what stays correct if that ever changes.
+            self._switch_to(self.workspace.current.key)
+            index = self.open_box.findData(self.workspace.current.key)
+            if index >= 0:
+                self.open_box.blockSignals(True)
+                self.open_box.setCurrentIndex(index)
+                self.open_box.blockSignals(False)
 
         summary = f"loaded {loaded} embedding{'s' if loaded != 1 else ''}"
         if failed:
@@ -1164,13 +1192,18 @@ class EmbeddingExplorer(QWidget):
 
         # Already open in this session (loaded via this dropdown before, or
         # via the multi-folder loader): switch to it instead of reloading
-        # and creating a duplicate entry for the same directory.
+        # and creating a duplicate entry for the same directory. _switch_to
+        # directly, not setCurrentIndex -- which is a no-op, signal included,
+        # when the combobox already shows that index.
         existing = self.workspace.find_by_directory(Path(directory))
         if existing:
+            self._switch_to(existing[0].key)
             index = self.open_box.findData(existing[0].key)
             if index >= 0:
+                self.open_box.blockSignals(True)
                 self.open_box.setCurrentIndex(index)
-                return
+                self.open_box.blockSignals(False)
+            return
 
         self._load_embedding_directory(Path(directory), announce=True)
 
@@ -1551,6 +1584,13 @@ class EmbeddingExplorer(QWidget):
         current = self.colour_box.currentData()
         self.colour_box.blockSignals(True)
         self.colour_box.clear()
+        # "Dataset" only exists on a joint entry's combined frame (see
+        # joint_projection.py); explorer_model.COLOUR_FIELDS does not know
+        # about it, since that module is deliberately workspace-agnostic.
+        # Listed first when present -- for a joint embedding it is usually
+        # the first thing worth colouring by.
+        if DATASET_COLUMN in self.frame.columns:
+            self.colour_box.addItem("Dataset", DATASET_COLUMN)
         for column in colour_fields(self.frame):
             self.colour_box.addItem(field_label(column), column)
         # Prefer a field that says something biological on first open.
@@ -1558,6 +1598,8 @@ class EmbeddingExplorer(QWidget):
             index = self.colour_box.findData(current)
             if index >= 0:
                 self.colour_box.setCurrentIndex(index)
+        elif DATASET_COLUMN in self.frame.columns:
+            self.colour_box.setCurrentIndex(0)
         else:
             for preferred in (MOA, GENE, DRUG, ROLE):
                 index = self.colour_box.findData(preferred)
@@ -2015,6 +2057,15 @@ class EmbeddingExplorer(QWidget):
             info=info,
         )
         entry.resolver = self.resolver
+        self._add_entry(entry)
+
+    def _add_entry(self, entry: EmbeddingEntry) -> None:
+        """Add an already-built entry to the workspace and make it current.
+
+        The lower-level primitive _register_entry and the joint-projection
+        path both fall through to this, so there is exactly one place an
+        entry actually joins the workspace.
+        """
         self.workspace.add(entry)
         self._sync_open_box()
 
@@ -2040,11 +2091,29 @@ class EmbeddingExplorer(QWidget):
         self.open_row_widget.setVisible(multiple)
         self.open_box.setVisible(multiple)
         self.close_button.setVisible(multiple)
+        # Combining needs two REAL sources; a lone joint entry (its sources
+        # since closed) cannot be combined with anything new until another
+        # ordinary embedding is loaded alongside it.
+        self.combine_button.setVisible(multiple)
 
     def _on_open_changed(self) -> None:
-        """Switch to another open embedding without reloading anything."""
+        """The combobox's own signal: switch to whatever it now shows."""
         key = self.open_box.currentData()
-        if not key or key == self._active_key:
+        if key:
+            self._switch_to(key)
+
+    def _switch_to(self, key: str) -> None:
+        """Switch to another open embedding without reloading anything.
+
+        The real work, callable directly and not only from the combobox's
+        signal -- which does NOT fire when setCurrentIndex is asked for the
+        index it is already showing. _sync_open_box moves the combobox to a
+        newly-added entry (Workspace.add makes it current) WHILE SIGNALS ARE
+        BLOCKED, so a caller that adds an entry and then sets the same index
+        again would see no signal and no switch at all; this is what
+        _combine_embeddings calls instead.
+        """
+        if key == self._active_key:
             return
         entry = self.workspace.get(key)
         if entry is None:
@@ -2109,6 +2178,85 @@ class EmbeddingExplorer(QWidget):
         self._active_key = None
         self._sync_open_box()
         self._on_open_changed()
+
+    def _combine_embeddings(self) -> None:
+        """Project several open embeddings together as one fit.
+
+        Building the joint entry is cheap (concatenation, not a fit --
+        measured ~76ms for two real 24k/36k x 1024 exports) and runs here on
+        the GUI thread; the expensive part is the projection itself, which
+        goes through the ordinary compute()/_ProjectionTask path exactly as
+        for any other entry, so it is threaded and cancellable the same way.
+        """
+        # Only real, single-source entries can be combined -- combining a
+        # joint entry again would silently duplicate its source vectors
+        # (concatenating an entry that already contains A+B with a fresh A
+        # would count A's points twice), which is not what "combine" means.
+        candidates = [e for e in self.workspace.entries if e.source != SOURCE_JOINT]
+        if len(candidates) < 2:
+            QMessageBox.information(
+                self,
+                "Combine embeddings",
+                "Need at least two non-combined embeddings open to combine. "
+                "A joint embedding cannot itself be combined again.",
+            )
+            return
+
+        from .combine_dialog import CombineEmbeddingsDialog
+
+        dialog = CombineEmbeddingsDialog(candidates, parent=self)
+        if dialog.exec() != CombineEmbeddingsDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.selected_entries()
+        if len(chosen) < 2:
+            return
+
+        from ..data.joint_projection import IncompatibleEmbeddings, make_joint_entry
+
+        try:
+            entry = make_joint_entry(chosen)
+        except IncompatibleEmbeddings as exc:
+            QMessageBox.warning(self, "Combine embeddings", str(exc))
+            return
+        except MemoryError:
+            # A real possibility: several 30k x 1024 float32 exports
+            # concatenated is a genuine amount of memory, and failing loudly
+            # here is far better than a cryptic crash mid-fit.
+            QMessageBox.warning(
+                self,
+                "Combine embeddings",
+                "Not enough memory to combine these embeddings. Try "
+                "combining fewer at once, or subsample after switching to "
+                "the joint embedding.",
+            )
+            return
+
+        self._add_entry(entry)
+        # _switch_to directly, not setCurrentIndex: _add_entry -> Workspace.add
+        # already made the joint entry current and _sync_open_box already
+        # moved the combobox there WHILE SIGNALS WERE BLOCKED, so
+        # setCurrentIndex would be asking for the index already showing and
+        # Qt would not emit currentIndexChanged at all -- self.frame/
+        # self.dataset would then silently keep pointing at the PREVIOUS
+        # entry. Measured: this exact sequence left ex.frame at one source
+        # entry's row count instead of the joint total.
+        self._switch_to(entry.key)
+        # t-SNE by default for a joint embedding: its emphasis on local
+        # structure is usually what a direct cross-dataset comparison wants,
+        # and it is not what apply_suggested_params (called by the switch
+        # above) chooses on its own.
+        self.method_box.setCurrentText(TSNE)
+        # Dataset by default too, overriding whatever _switch_to kept from
+        # the previously-viewed entry: the natural first question for a
+        # BRAND NEW joint embedding is "where does each dataset land", not
+        # whichever field happened to be selected before combining.
+        dataset_index = self.colour_box.findData(DATASET_COLUMN)
+        if dataset_index >= 0:
+            self.colour_box.setCurrentIndex(dataset_index)
+        self.status.emit(
+            f"combined {len(chosen)} embeddings into {entry.n_points:,} points "
+            f"-- press Compute projection"
+        )
 
     def _on_tsne_changed(self) -> None:
         """A t-SNE parameter changed: the current layout is now stale.

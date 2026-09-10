@@ -42,6 +42,10 @@ from .embeddings import EmbeddingDataset
 SOURCE_EXPORT = "export"      # the vectors shipped with the dataset
 SOURCE_COMPUTED = "computed"  # descriptors computed from the images here
 SOURCE_EXTERNAL = "external"  # loaded from elsewhere and attached
+# A concatenation of several OTHER entries, projected together as one fit so
+# that position is comparable across them -- see plato.data.joint_projection.
+# info["source_names"] carries which entries went into it, for the label.
+SOURCE_JOINT = "joint"
 
 
 @dataclass
@@ -108,6 +112,8 @@ class EmbeddingEntry:
             bits.append("computed")
         elif self.source == SOURCE_EXTERNAL:
             bits.append("external")
+        elif self.source == SOURCE_JOINT:
+            bits.append("joint")
         head, *rest = bits
         return f"{head} ({', '.join(rest)})" if rest else head
 
@@ -119,6 +125,10 @@ class EmbeddingEntry:
             parts.append(f"model: {model}")
         if self.source == SOURCE_COMPUTED:
             parts.append("descriptors computed from images")
+        elif self.source == SOURCE_JOINT:
+            names = self.info.get("source_names", [])
+            if names:
+                parts.append(f"combining {', '.join(names)}")
         return " · ".join(parts)
 
 
