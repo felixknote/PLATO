@@ -149,6 +149,52 @@ def continuous_colours(values: list[str]) -> dict[str, str]:
     return mapping
 
 
+def ramp_over_array(values, low: float, high: float, *, steps: int = 24):
+    """Colour a numeric array along the ramp, batched into draw groups.
+
+    Returns ``(colours, groups)`` in the form ``EmbeddingScatter.set_points``
+    wants: one hex colour per point, plus colour -> positional mask so the
+    scatter can draw each shade in a single call.
+
+    Quantised to ``steps`` bands rather than one colour per point, because the
+    scatter batches by colour: 24k distinct colours would mean 24k draw calls
+    and an unusable plot, while 24 bands are indistinguishable to the eye at
+    the ramp's resolution and draw in 24. Non-finite values (an image that
+    could not be read) become the unknown grey, which is honest -- they have
+    no measurement rather than a low one.
+    """
+    import numpy as np
+
+    values = np.asarray(values, dtype=np.float32)
+    span = high - low
+    finite = np.isfinite(values)
+    # Compute the band only where there is a number. np.where would evaluate
+    # the cast over the whole array first, and casting NaN to an integer is
+    # undefined -- it happens to be discarded here, but it raises a warning
+    # and the value it produces is platform-dependent.
+    bands = np.full(values.shape, -1, dtype=np.int32)
+    if finite.any():
+        fractions = np.clip(
+            (values[finite] - low) / (span if span > 0 else 1.0), 0.0, 1.0
+        )
+        bands[finite] = np.round(fractions * (steps - 1)).astype(np.int32)
+
+    palette = {band: continuous_colour(band / (steps - 1)) for band in range(steps)}
+    palette[-1] = UNKNOWN_COLOUR
+
+    colours = [palette[int(b)] for b in bands]
+    groups: dict[str, np.ndarray] = {}
+    # Unknown first, so measured points draw over the grey rather than under.
+    for band in sorted(set(bands.tolist())):
+        colour = palette[int(band)]
+        mask = np.flatnonzero(bands == band)
+        if colour in groups:
+            groups[colour] = np.concatenate([groups[colour], mask])
+        else:
+            groups[colour] = mask
+    return colours, groups
+
+
 def colours_for(values: list[str]) -> tuple[dict[str, str], bool]:
     """(value -> colour, is_continuous) for one column's distinct values."""
     if looks_continuous(values):

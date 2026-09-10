@@ -46,7 +46,11 @@ DRUG_DOSE_RE = re.compile(r"^(?P<drug>.+?)\s+(?P<dose>[\d.]+x)$")
 # case-insensitively against the whole label after collapsing whitespace.
 CONTROL_LABELS = {
     "wt": "WT (untreated)",
-    "wt nc": "WT (vehicle control)",
+    # NC is a non-targeting guide, not a solvent: the CRISPRi machinery is
+    # present and directed at nothing, which is the control for the effect of
+    # knockdown itself. Naming it a vehicle control would put it in the same
+    # class as DMSO below, which controls for something else entirely.
+    "wt nc": "WT (non-targeting gRNA)",
     "dmso": "Vehicle (DMSO)",
     "water": "Vehicle (water)",
 }

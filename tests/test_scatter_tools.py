@@ -61,13 +61,44 @@ def test_lasso_over_empty_space_selects_nothing(scatter):
     assert len(scatter.selected_rows) == 0
 
 
-def test_selection_is_dropped_when_the_points_change(scatter):
+def test_selection_survives_a_redraw(scatter):
+    """Filtering or recolouring must not throw away a chosen cluster.
+
+    set_points is called for every filter change and every recolour, not only
+    for a new projection. Dropping the selection there would mean lassoing a
+    cluster and then filtering within it -- the obvious next move -- silently
+    emptied it. Selection is held in ROW space precisely so it can outlive the
+    positions changing.
+
+    A genuinely new projection is different, and the explorer clears the
+    selection itself when one arrives (see _on_projection); the scatter cannot
+    tell the two apart from set_points alone.
+    """
     _lasso(scatter, -8, -2, -3, 3)
     assert len(scatter.selected_rows) == 300
-    # New coordinates mean the old row indices are meaningless.
+    kept = scatter.selected_rows.copy()
+
+    # Redraw with a subset, as a filter would: same rows, fewer of them.
     coords = np.zeros((10, 2), dtype=np.float32)
-    scatter.set_points(coords, np.arange(10, dtype=np.int64), ["#4a90d9"] * 10)
-    assert len(scatter.selected_rows) == 0
+    rows = np.arange(10, dtype=np.int64)
+    scatter.set_points(coords, rows, ["#4a90d9"] * 10)
+
+    assert np.array_equal(scatter.selected_rows, kept)
+    # Only the rows still drawn are ringed; the rest stay selected but unseen.
+    assert scatter._selection.isVisible()
+
+
+def test_selection_rings_only_what_is_drawn(scatter):
+    """A selected row that is filtered out contributes no ring."""
+    scatter.set_selection(np.asarray([0, 1, 2], dtype=np.int64))
+    # Redraw showing only row 0.
+    scatter.set_points(
+        np.zeros((1, 2), dtype=np.float32),
+        np.asarray([0], dtype=np.int64),
+        ["#4a90d9"],
+    )
+    assert len(scatter.selected_rows) == 3
+    assert len(scatter._selection.getData()[0]) == 1
 
 
 def test_density_replaces_the_marks(scatter):

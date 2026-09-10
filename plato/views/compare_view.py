@@ -20,9 +20,11 @@ from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -45,6 +47,10 @@ _CACHE_ENTRIES = 12
 
 _MAX_ZOOM = 20.0
 _ZOOM_STEP = 1.25
+
+# Narrowest a comparison column may become before the strip scrolls instead of
+# shrinking further. Below roughly this, a micrograph stops being judgeable.
+MIN_COLUMN_PX = 240
 
 
 @dataclass(slots=True)
@@ -134,10 +140,16 @@ class ComparisonColumn(QWidget):
         rows: list[ImageRow],
         viewport: Viewport | None = None,
         parent: QWidget | None = None,
+        *,
+        caption: str = "",
     ) -> None:
         super().__init__(parent)
         self.rows = rows
         self.position = 0
+        # A fixed caption, for columns that are one chosen image rather than a
+        # slice being stepped through. Empty means "describe the position",
+        # which is what a dose series wants.
+        self.fixed_caption = caption
         self._levels: tuple[float, float] | None = None
         self.autoscale = False
         self.selected = False
@@ -366,9 +378,12 @@ class ComparisonColumn(QWidget):
             )
         n = len(self.rows)
         zoom = "" if self.viewport.is_identity else f" · {self.viewport.zoom:.1f}×"
-        self.caption.setText(
-            f"{row.well} · field {row.field or '—'} · {self.position % n + 1}/{n}{zoom}"
-        )
+        if self.fixed_caption:
+            self.caption.setText(f"{self.fixed_caption}{zoom}")
+        else:
+            self.caption.setText(
+                f"{row.well} · field {row.field or '—'} · {self.position % n + 1}/{n}{zoom}"
+            )
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt override
         super().resizeEvent(event)
@@ -393,6 +408,21 @@ class ComparisonView(QWidget):
         self.strip.setContentsMargins(0, 0, 0, 0)
         strip_container = QWidget()
         strip_container.setLayout(self.strip)
+
+        # Columns are laid out in a scroll area rather than directly, because
+        # the number of them is no longer bounded by a handful of slices: a
+        # comparison of 30 selected points would otherwise divide the width
+        # into 30 unreadable slivers. Below MIN_COLUMN_PX each they scroll
+        # horizontally instead; at or above it they fill the width as before,
+        # so the dose-series case looks exactly as it did.
+        self.strip_scroll = QScrollArea()
+        self.strip_scroll.setWidget(strip_container)
+        self.strip_scroll.setWidgetResizable(True)
+        self.strip_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.strip_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._strip_container = strip_container
 
         self.prev_button = QPushButton("◀ Previous")
         self.next_button = QPushButton("Next ▶")
@@ -443,7 +473,7 @@ class ComparisonView(QWidget):
         controls.addWidget(self.export_button)
 
         layout = QVBoxLayout()
-        layout.addWidget(strip_container, 1)
+        layout.addWidget(self.strip_scroll, 1)
         layout.addLayout(controls)
         self.setLayout(layout)
 
@@ -464,7 +494,38 @@ class ComparisonView(QWidget):
             self.strip.addWidget(column, 1)
         if columns:
             self.select_column(columns[0])
+        self._fit_strip()
+        # Stepping, realigning and the position readout are all about moving
+        # within a slice. When every column holds exactly one image there is
+        # nowhere to step, and the controls would be dead weight.
+        steppable = any(len(c.rows) > 1 for c in columns)
+        for widget in (
+            self.prev_button,
+            self.next_button,
+            self.realign_button,
+            self.position_label,
+        ):
+            widget.setVisible(steppable)
         self.refresh()
+
+    def _fit_strip(self) -> None:
+        """Give every column at least MIN_COLUMN_PX, scrolling if need be."""
+        count = len(self.columns)
+        if not count:
+            self._strip_container.setMinimumWidth(0)
+            return
+        needed = count * MIN_COLUMN_PX
+        # Only force a minimum when the columns would otherwise be too narrow;
+        # leaving it at 0 lets them stretch to fill a wide window.
+        self._strip_container.setMinimumWidth(
+            needed if needed > self.strip_scroll.viewport().width() else 0
+        )
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt override
+        super().resizeEvent(event)
+        # The threshold between "fill the width" and "scroll" depends on the
+        # width, so it has to be re-evaluated when the window changes.
+        self._fit_strip()
 
     # -- zoom -------------------------------------------------------------
 

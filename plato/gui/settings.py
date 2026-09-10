@@ -21,7 +21,13 @@ APPLICATION = "plato"
 DEFAULT_NM_PER_PIXEL = 108.0
 # Bar length as a fraction of the image's width, so it scales with field of
 # view / magnification instead of being pinned to one physical length.
-DEFAULT_SCALE_BAR_FRACTION = 0.02
+#
+# 1%, not 2%: the rule rounds UP to the nearest 1/2/5 x 10^n um, so at the
+# 108 nm/px default a 2% target (5.9 um) became a 10 um bar spanning a visibly
+# large part of the field. 1% targets 2.9 um and lands on 5 um, which reads as
+# a reference mark rather than a feature of the image. Still adaptive: a
+# coarser pixel size moves it back up to 10 um on its own.
+DEFAULT_SCALE_BAR_FRACTION = 0.01
 
 
 def get_nm_per_pixel() -> float:

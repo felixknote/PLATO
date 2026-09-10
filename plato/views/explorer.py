@@ -55,8 +55,10 @@ from ..data.embeddings import (
 )
 from ..data.explorer_model import (
     CONCENTRATION,
+    CONDITION,
     DRUG,
     GENE,
+    GUIDE,
     IMAGE_NAME,
     MOA,
     PATHWAY,
@@ -90,8 +92,9 @@ from ..data.projection import (
 from ..gui.theme import BORDER, SURFACE, TEXT, TEXT_FAINT, TEXT_MUTED
 from ..gui.viewer import ImageWindow
 from .palette import UNKNOWN_COLOUR, colours_for, is_unknown, sort_values
-from .gallery import SelectionGallery
-from .preview import PreviewPane
+from .cluster_panel import ClusterPanel
+from .stats_panel import StatsPanel
+from .selection_panel import SelectionPanel
 from .scatter import EmbeddingScatter
 
 # Legend gets unreadable long before this; past it, colour still encodes the
@@ -99,6 +102,11 @@ from .scatter import EmbeddingScatter
 MAX_LEGEND_ENTRIES = 24
 
 COMPUTED_FROM_PLATES = "<loaded-plates>"
+
+# Most columns a single comparison window will open. Each column decodes and
+# holds its own image, so an unbounded comparison of a 5,000-point lasso would
+# exhaust memory long before it became something anyone could look at.
+MAX_COMPARE_COLUMNS = 24
 
 # Subsample choices, as a share of the dataset.
 FULL_SAMPLE = "100% (all)"
@@ -292,6 +300,12 @@ class EmbeddingExplorer(QWidget):
         self._resolving = False
         # Parameters suggested for the loaded dataset; the controls start here.
         self._suggested: ProjectionParams | None = None
+        # Per-image statistics, once computed. None until the user asks.
+        self._image_stats: dict | None = None
+        self._stats_run = None
+        self._stats_signals = None
+        # Which statistic is colouring the plot, or None for metadata.
+        self._stat_column: str | None = None
         self._windows: list[ImageWindow] = []
         self._busy = False
         self._cancelled = False
@@ -500,13 +514,6 @@ class EmbeddingExplorer(QWidget):
         )
         self.density_box.toggled.connect(self._on_density_toggled)
 
-        self.lasso_box = QCheckBox("Lasso select")
-        self.lasso_box.setToolTip(
-            "Click to start an outline, move to trace it, click again to "
-            "close.\nThe images inside appear below the plot."
-        )
-        self.lasso_box.toggled.connect(self._on_lasso_toggled)
-
         self.dim_others_box = QCheckBox("Grey out unannotated")
         self.dim_others_box.setChecked(True)
         self.dim_others_box.setToolTip(
@@ -523,9 +530,41 @@ class EmbeddingExplorer(QWidget):
         display_form.addRow(self.legend_box)
         display_form.addRow(self.dim_others_box)
         display_form.addRow(self.density_box)
-        display_form.addRow(self.lasso_box)
         display_group = QGroupBox("Display")
         display_group.setLayout(display_form)
+
+        # --- lasso analysis
+        #
+        # Its own group rather than another checkbox in Display, because it is
+        # not a display option: it is a mode plus the readout that mode
+        # produces, and the readout is the larger half.
+        self.cluster_panel = ClusterPanel()
+        self.cluster_panel.lasso_toggled.connect(self._on_lasso_toggled)
+        self.cluster_panel.additive_toggled.connect(self._on_lasso_additive)
+        self.cluster_panel.show_images_requested.connect(self._show_selection_images)
+        # clear_requested is connected after the scatter exists; the display
+        # controls are built before it.
+        cluster_group = QGroupBox("Lasso Analysis")
+        cluster_layout = QVBoxLayout()
+        cluster_layout.setContentsMargins(6, 4, 6, 4)
+        cluster_layout.addWidget(self.cluster_panel)
+        cluster_group.setLayout(cluster_layout)
+
+        # --- image statistics
+        #
+        # Its own group, and off by default. Every other control here works
+        # from data already in memory; this one reads every image in the
+        # dataset, so it is opt-in rather than something the user can switch
+        # on without realising what it costs.
+        self.stats_panel = StatsPanel()
+        self.stats_panel.compute_requested.connect(self._compute_image_stats)
+        self.stats_panel.cancel_requested.connect(self._cancel_image_stats)
+        self.stats_panel.stat_selected.connect(self._on_stat_selected)
+        stats_group = QGroupBox("Image Statistics")
+        stats_layout = QVBoxLayout()
+        stats_layout.setContentsMargins(6, 4, 6, 4)
+        stats_layout.addWidget(self.stats_panel)
+        stats_group.setLayout(stats_layout)
 
         # --- filters
         self.filter_layout = QVBoxLayout()
@@ -541,6 +580,8 @@ class EmbeddingExplorer(QWidget):
         left.setSpacing(10)
         left.addWidget(projection_group)
         left.addWidget(display_group)
+        left.addWidget(cluster_group)
+        left.addWidget(stats_group)
         left.addLayout(self.filter_layout)
         left.addStretch(1)
         left.addWidget(clear_filters)
@@ -559,12 +600,10 @@ class EmbeddingExplorer(QWidget):
         # --- centre: the plot
         self.scatter = EmbeddingScatter()
         self.scatter.point_hovered.connect(self._on_hover)
-        self.scatter.point_clicked.connect(self._on_click)
+        self.scatter.point_clicked.connect(self._on_point_clicked)
+        self.scatter.point_activated.connect(self._on_click)
         self.scatter.points_selected.connect(self._on_selection)
-
-        self.gallery = SelectionGallery()
-        self.gallery.row_activated.connect(self._on_click)
-        self.gallery.hide()
+        self.cluster_panel.clear_requested.connect(self.scatter.clear_selection)
 
         self.message = QLabel("")
         self.message.setWordWrap(True)
@@ -606,38 +645,42 @@ class EmbeddingExplorer(QWidget):
         centre.addWidget(self.message, 1)
         centre.addWidget(self.compute_features_button, 0, Qt.AlignmentFlag.AlignCenter)
         centre.addWidget(self.scatter, 1)
-        centre.addWidget(self.gallery)
         centre_widget = QWidget()
         centre_widget.setLayout(centre)
 
-        # --- right: hover preview
-        heading = QLabel("Point")
-        heading.setObjectName("panelHeading")
-        self.preview = PreviewPane()
-        hint = QLabel("Hover to preview · click to open full resolution")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 11px;")
+        # --- right: the selection, one cropped preview per point
+        self.selection_panel = SelectionPanel()
+        self.selection_panel.set_providers(self._describe, self._path_for)
+        self.selection_panel.row_clicked.connect(self._on_entry_clicked)
+        self.selection_panel.row_activated.connect(self._on_click)
+        self.selection_panel.selection_changed.connect(self._on_panel_edited)
+        self.selection_panel.compare_requested.connect(self.compare_selection)
+        self.selection_panel.reveal_failed.connect(self.status.emit)
 
-        right = QVBoxLayout()
-        right.setContentsMargins(12, 10, 12, 10)
-        right.setSpacing(8)
-        right.addWidget(heading)
-        right.addWidget(self.preview, 1)
-        right.addWidget(hint)
-        right_container = QWidget()
-        right_container.setLayout(right)
-        right_container.setMinimumWidth(280)
-        right_container.setMaximumWidth(340)
+        right_container = self.selection_panel
+        # No maximum: the column is meant to be dragged wide when you want to
+        # look closely, which is the point of making it resizable at all.
+        right_container.setMinimumWidth(200)
 
-        splitter = QSplitter()
-        splitter.addWidget(left_scroll)
-        splitter.addWidget(centre_widget)
-        splitter.addWidget(right_container)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
-        splitter.setSizes([300, 1060, 300])
-        splitter.setChildrenCollapsible(False)
+        self.splitter = QSplitter()
+        self.splitter.addWidget(left_scroll)
+        self.splitter.addWidget(centre_widget)
+        self.splitter.addWidget(right_container)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setStretchFactor(2, 0)
+        self.splitter.setSizes([300, 1000, 360])
+        self.splitter.setChildrenCollapsible(False)
+        # Wider column, bigger previews. Debounced: a drag emits a signal per
+        # pixel, and re-decoding images on each would make the drag crawl.
+        self._preview_resize_timer = QTimer(self)
+        self._preview_resize_timer.setSingleShot(True)
+        self._preview_resize_timer.setInterval(120)
+        self._preview_resize_timer.timeout.connect(self._apply_preview_width)
+        self.splitter.splitterMoved.connect(
+            lambda *_: self._preview_resize_timer.start()
+        )
+        splitter = self.splitter
 
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -771,7 +814,8 @@ class EmbeddingExplorer(QWidget):
         if self.dataset is not None:
             self._resolver_cache[str(self.dataset.directory)] = (self.resolver, [])
         self._update_source_label()
-        self.preview.clear()
+        # Paths just changed, so any "image not found" entries can now resolve.
+        self.selection_panel.set_rows(list(self.selection_panel.rows))
         self.status.emit(f"source data: {root}")
 
     def _update_source_label(self) -> None:
@@ -1283,6 +1327,11 @@ class EmbeddingExplorer(QWidget):
             return
         self.result = result
         self._set_message("")
+        # A new projection is new coordinates: points that sat together no
+        # longer do, so a selection made on the old layout describes nothing
+        # in this one. Filtering and recolouring keep the selection (they only
+        # change what is drawn); reprojecting cannot.
+        self.scatter.clear_selection()
         origin = "cached" if result.from_cache else f"{result.seconds:.1f}s"
         self.status.emit(
             f"{result.params.method}: {len(result.coords):,} points ({origin})"
@@ -1329,6 +1378,14 @@ class EmbeddingExplorer(QWidget):
                 legend_entries=None,
             )
             self.count_label.setText("<b>0</b> of %d points" % len(rows))
+            return
+
+        # Colouring by a measured statistic short-circuits the categorical
+        # path entirely: the values are continuous, so they get a ramp and a
+        # range readout rather than a palette and a legend.
+        stat_values = self._stat_values(visible)
+        if stat_values is not None:
+            self._draw_continuous(coords, visible, stat_values, rows, reset_view)
             return
 
         column = self.colour_box.currentData()
@@ -1380,6 +1437,67 @@ class EmbeddingExplorer(QWidget):
             f"<b>{len(coords):,}</b> of {len(rows):,} points · {label}{extra}"
         )
 
+    def _draw_continuous(self, coords, visible, values, rows, reset_view: bool) -> None:
+        """Colour points by a measured statistic, on a continuous ramp.
+
+        Separate from the categorical path because the questions differ. A
+        category needs distinguishable colours and a legend; a measurement
+        needs an ordered ramp and its range, so that "brighter is further
+        along the scale" is readable without looking anything up.
+
+        Percentile limits, not min/max: one saturated field would otherwise
+        compress every other point into the bottom of the scale.
+        """
+        from .palette import ramp_over_array
+
+        values = np.asarray(values, dtype=np.float32)
+        finite = values[np.isfinite(values)]
+        if len(finite) == 0:
+            # Measured nothing that is on screen: draw the points plainly
+            # rather than an all-grey plot with a meaningless scale.
+            self.scatter.set_points(
+                coords,
+                visible,
+                [UNKNOWN_COLOUR] * len(coords),
+                point_size=self.size_slider.value(),
+                opacity=self.opacity_slider.value() / 100.0,
+                legend_entries=None,
+                reset_view=reset_view,
+            )
+            self.count_label.setText(
+                f"<b>{len(coords):,}</b> of {len(rows):,} points · "
+                f"no measurements for these"
+            )
+            return
+
+        low, high = (float(v) for v in np.percentile(finite, [2, 98]))
+        if high <= low:
+            high = low + 1e-6
+        colours, groups = ramp_over_array(values, low, high)
+
+        self.scatter.set_points(
+            coords,
+            visible,
+            colours,
+            groups=groups,
+            point_size=self.size_slider.value(),
+            opacity=self.opacity_slider.value() / 100.0,
+            legend_entries=None,
+            reset_view=reset_view,
+        )
+        if self.density_box.isChecked():
+            self.scatter.set_density(True)
+
+        from ..data.image_stats import STAT_LABELS
+
+        label = STAT_LABELS.get(self._stat_column, self._stat_column or "")
+        unmeasured = int((~np.isfinite(values)).sum())
+        note = f" · {unmeasured:,} unmeasured" if unmeasured else ""
+        self.count_label.setText(
+            f"<b>{len(coords):,}</b> of {len(rows):,} points · {label} "
+            f"{low:,.0f}–{high:,.0f}{note}"
+        )
+
     # -- selection --------------------------------------------------------
 
     def _on_density_toggled(self, enabled: bool) -> None:
@@ -1391,31 +1509,278 @@ class EmbeddingExplorer(QWidget):
 
     def _on_lasso_toggled(self, enabled: bool) -> None:
         self.scatter.set_lasso(enabled)
-        self.gallery.setVisible(enabled)
-        if not enabled:
-            self.scatter.clear_selection()
-        else:
+        self.cluster_panel.set_lasso_active(enabled)
+        if enabled:
             self.status.emit("click to start an outline, click again to close it")
 
-    def _on_selection(self, rows) -> None:
-        """Show the images behind a lasso'd region."""
-        if self.frame is None or rows is None or len(rows) == 0:
-            self.gallery.show_selection([], 0)
+    def _compute_image_stats(self) -> None:
+        """Measure every image in the dataset, on the thread pool."""
+        if self.frame is None or self.dataset is None:
+            return
+        if self.resolver is None:
+            QMessageBox.information(
+                self,
+                "Image statistics",
+                "The images for this dataset have not been located yet.\n\n"
+                "Use Locate… to point PLATO at the folder holding them, then "
+                "try again.",
+            )
             return
 
-        entries: list[tuple[int, Path]] = []
-        # Resolving a path is a filesystem stat per row, so stop once there
-        # are enough tiles to fill the grid rather than checking thousands.
-        from .gallery import MAX_TILES
+        from ..data.image_stats import StatsCache
+        from . import stats_worker
 
-        for row_index in rows:
-            path = self._path_for(int(row_index))
-            if path is not None:
-                entries.append((int(row_index), path))
-                if len(entries) >= MAX_TILES:
-                    break
-        self.gallery.show_selection(entries, len(rows))
-        self.status.emit(f"{len(rows):,} points selected")
+        n_rows = len(self.frame)
+        cache = StatsCache(self.work_dir / "projections")
+        fingerprint = self.dataset.fingerprint()
+        cached = cache.load(fingerprint, n_rows)
+        if cached is not None:
+            self._apply_image_stats(cached, from_cache=True)
+            return
+
+        # Resolving a path is a filesystem stat per row; done here on the GUI
+        # thread it would freeze for as long as the walk takes, so it happens
+        # inside the same pass as the reads.
+        self.stats_panel.set_running(True)
+        self.status.emit(f"measuring {n_rows:,} images…")
+
+        rows = list(range(n_rows))
+        paths = [self._path_for(row) for row in rows]
+
+        signals = stats_worker.StatsSignals()
+        signals.progress.connect(self.stats_panel.set_progress)
+        signals.finished.connect(self._on_stats_finished)
+        signals.failed.connect(self._on_stats_failed)
+        self._stats_signals = signals  # keep alive for the run
+        self._stats_run = stats_worker.start(
+            QThreadPool.globalInstance(), rows, paths, n_rows, signals
+        )
+
+    def _cancel_image_stats(self) -> None:
+        if self._stats_run is not None:
+            self._stats_run.cancel()
+        self.stats_panel.set_running(False)
+        self.status.emit("image statistics cancelled")
+
+    def _on_stats_finished(self, values) -> None:
+        self.stats_panel.set_running(False)
+        if self.dataset is not None:
+            from ..data.image_stats import StatsCache
+
+            try:
+                StatsCache(self.work_dir / "projections").save(
+                    self.dataset.fingerprint(), values
+                )
+            except OSError:
+                # A cache that cannot be written costs a recompute, nothing more.
+                pass
+        self._apply_image_stats(values, from_cache=False)
+
+    def _on_stats_failed(self, message: str) -> None:
+        self.stats_panel.set_running(False)
+        self.status.emit(f"image statistics failed: {message}")
+
+    def _apply_image_stats(self, values, *, from_cache: bool) -> None:
+        """Attach measured statistics to the frame and offer them for colour."""
+        self._image_stats = values
+        first = next(iter(values.values())) if values else np.empty(0)
+        measured = int(np.isfinite(first).sum()) if len(first) else 0
+        total = len(self.frame) if self.frame is not None else 0
+        self.stats_panel.set_available(measured, total)
+        origin = "cached" if from_cache else "measured"
+        self.status.emit(f"image statistics {origin}: {measured:,} of {total:,} images")
+
+    def _on_stat_selected(self, name) -> None:
+        """Colour by a statistic, or hand colouring back to the metadata."""
+        self._stat_column = name
+        # Colouring by a continuous statistic and by a category are mutually
+        # exclusive; disable the other control rather than letting one
+        # silently win.
+        self.colour_box.setEnabled(name is None)
+        self._redraw()
+
+    def _stat_values(self, rows) -> np.ndarray | None:
+        """The selected statistic for ``rows``, or None if not applicable."""
+        if self._stat_column is None or self._image_stats is None:
+            return None
+        array = self._image_stats.get(self._stat_column)
+        if array is None:
+            return None
+        return np.asarray(array)[rows]
+
+    def _on_lasso_additive(self, additive: bool) -> None:
+        """Whether the next lasso adds to the selection or replaces it."""
+        self.scatter.set_lasso(self.scatter.lasso_enabled, additive=additive)
+
+    def _on_selection(self, rows) -> None:
+        """One place where a selection change lands, whatever caused it.
+
+        Click, shift-click, lasso and removing an entry all arrive here, so
+        the plot rings, the preview column and the cluster breakdown can never
+        disagree about what is selected.
+        """
+        rows = np.asarray(rows, dtype=np.int64).ravel() if rows is not None else np.empty(0, np.int64)
+        self.selection_panel.set_rows(rows)
+        self._update_composition(rows)
+        if len(rows):
+            self.status.emit(f"{len(rows):,} point{'s' if len(rows) != 1 else ''} selected")
+
+    def _update_composition(self, rows) -> None:
+        """Break the selection down for the Lasso Analysis panel."""
+        if self.frame is None:
+            return
+        from ..data.cluster_stats import compose
+
+        self.cluster_panel.show_composition(compose(self.frame, rows))
+
+    def _on_point_clicked(self, row_index: int) -> None:
+        """A single click on the plot: show that point, do NOT open it."""
+        self.selection_panel.set_current(row_index)
+
+    def _on_entry_clicked(self, row_index: int) -> None:
+        """A click in the preview column: highlight that point in the plot."""
+        self.scatter.set_hover_marker(row_index)
+
+    def _on_panel_edited(self, rows) -> None:
+        """The panel removed a point, or cleared the selection."""
+        self.scatter.set_selection(np.asarray(list(rows), dtype=np.int64))
+
+    def _show_selection_images(self) -> None:
+        """Bring the lasso's points into the preview column."""
+        rows = self.scatter.selected_rows
+        if len(rows) == 0:
+            return
+        self.selection_panel.set_rows(rows)
+        # A lasso can hold thousands of points; the panel builds them a page
+        # at a time, so say what is actually being shown.
+        self.status.emit(f"listing {len(rows):,} selected images")
+
+    def _apply_preview_width(self) -> None:
+        """Scale the preview images to the column's current width."""
+        sizes = self.splitter.sizes()
+        if len(sizes) >= 3:
+            self.selection_panel.set_image_width(sizes[2])
+
+    def showEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt override
+        """Size the previews to the column the first time it is on screen.
+
+        Splitter sizes are not final until the widget has been laid out, so a
+        width read during construction is the placeholder rather than the real
+        one; without this the first previews render at the default size no
+        matter how wide the column actually is.
+        """
+        super().showEvent(event)
+        self._preview_resize_timer.start()
+
+    def compare_selection(self) -> None:
+        """Open every selected point side by side in the comparison view.
+
+        Reuses the browser's ComparisonView rather than a second
+        implementation: one column per selected point, each holding that one
+        image, sharing the locked zoom/pan viewport that makes columns
+        genuinely comparable.
+        """
+        rows = [int(r) for r in self.selection_panel.rows]
+        if len(rows) < 2:
+            QMessageBox.information(
+                self,
+                "Compare",
+                "Select at least two points to compare.\n\n"
+                "Click a point, then shift-click others — or lasso a region "
+                "and press Show images.",
+            )
+            return
+
+        from .compare_view import ComparisonColumn, ComparisonView
+
+        columns = []
+        missing = 0
+        for row_index in rows[:MAX_COMPARE_COLUMNS]:
+            image_row = self._image_row(row_index)
+            if image_row is None:
+                missing += 1
+                continue
+            columns.append(
+                ComparisonColumn(
+                    self._compare_title(row_index),
+                    [image_row],
+                    caption=self._compare_caption(row_index),
+                )
+            )
+        if not columns:
+            QMessageBox.warning(
+                self, "Compare", "None of the selected points have an image on disk."
+            )
+            return
+
+        window = QWidget(self)
+        window.setWindowFlag(Qt.WindowType.Window, True)
+        window.setWindowTitle(f"Compare — {len(columns)} images")
+        window.resize(min(1800, 380 * len(columns) + 120), 900)
+
+        view = ComparisonView(window)
+        view.status.connect(self.status.emit)
+        view.set_columns(columns)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(view)
+        window.setLayout(layout)
+        window.show()
+        # Held so Python does not garbage-collect the window immediately.
+        self._windows.append(window)
+
+        note = f"comparing {len(columns)} images"
+        if missing:
+            note += f" ({missing} had no image on disk)"
+        if len(rows) > MAX_COMPARE_COLUMNS:
+            note += f" — first {MAX_COMPARE_COLUMNS} of {len(rows):,}"
+        self.status.emit(note)
+
+    def _compare_title(self, row_index: int) -> str:
+        """A short heading for one comparison column."""
+        if self.frame is None:
+            return str(row_index)
+        record = self.frame.iloc[row_index]
+        condition = str(record.get(CONDITION, "") or "")
+        return condition or str(record.get(IMAGE_NAME, "") or f"row {row_index}")
+
+    def _compare_caption(self, row_index: int) -> str:
+        """Where this image came from, under its column.
+
+        Built from whichever identifying fields the dataset has rather than a
+        fixed set, so an antibiotic plate and a CRISPRi plate each get a
+        caption made of what they actually carry.
+        """
+        if self.frame is None:
+            return ""
+        record = self.frame.iloc[row_index]
+        parts = [
+            str(record.get(column, "") or "")
+            for column in (PLATE, WELL, DRUG, CONCENTRATION, GENE, GUIDE)
+        ]
+        return " · ".join(p for p in parts if p)
+
+    def _image_row(self, row_index: int) -> ImageRow | None:
+        """One frame row as an ImageRow, or None if its file is missing."""
+        path = self._path_for(row_index)
+        if path is None or self.frame is None:
+            return None
+        record = self.frame.iloc[row_index]
+        return ImageRow(
+            image_id=str(record.get(IMAGE_NAME, "")),
+            path=str(path),
+            plate=str(record.get(PLATE, "")),
+            well=str(record.get(WELL, "")),
+            field=None,
+            channel=None,
+            metadata={
+                field_label(c): record.get(c, "")
+                for c in (GENE, GUIDE, DRUG, CONCENTRATION, MOA, PATHWAY, ROLE)
+                if str(record.get(c, "") or "")
+            },
+            rating=None,
+            flagged=False,
+        )
 
     # -- interaction ------------------------------------------------------
 
@@ -1445,12 +1810,18 @@ class EmbeddingExplorer(QWidget):
         return self.resolver.path_for(self.frame.iloc[row_index])
 
     def _on_hover(self, row_index: int) -> None:
+        """Hovering names the point in the status bar; it no longer loads it.
+
+        The right-hand column belongs to the SELECTION now. Letting the cursor
+        overwrite it would mean the images you deliberately chose disappear
+        the moment you move the mouse across the plot -- which is exactly what
+        makes a preview-on-hover panel useless for comparing.
+        """
         if row_index < 0 or self.frame is None:
-            self.preview.clear()
             return
-        self.preview.show_row(
-            row_index, self._describe(row_index), self._path_for(row_index)
-        )
+        condition = str(self.frame.iloc[row_index].get(CONDITION, "") or "")
+        if condition:
+            self.status.emit(condition)
 
     def _on_click(self, row_index: int) -> None:
         if self.frame is None:

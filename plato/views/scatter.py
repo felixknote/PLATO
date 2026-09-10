@@ -58,6 +58,12 @@ DENSITY_SIGMA = 0.012
 # A lasso shorter than this many points is a stray click-drag, not a selection.
 MIN_LASSO_POINTS = 4
 
+# Selected points are ringed in this colour at this size. Amber because it is
+# the one hue the density map and the categorical palettes both avoid, so a
+# selection never reads as just another category.
+SELECTION_COLOUR = "#e8a33d"
+SELECTION_RING_PX = 13
+
 
 def _density_lookup_table() -> np.ndarray:
     """Background -> blue -> cyan -> amber, as a 256-entry RGB table.
@@ -100,8 +106,16 @@ class EmbeddingScatter(QWidget):
 
     # Row index into the explorer frame, or -1 when the cursor leaves a point.
     point_hovered = Signal(int)
+    # A single click: select this point. Deliberately NOT "open" -- opening a
+    # full-resolution viewer is a double-click, because a single click is how
+    # you build a selection and every stray click would otherwise spawn a
+    # window over the plot.
     point_clicked = Signal(int)
-    # Row indices inside a freehand lasso; empty when a selection is cleared.
+    # A double click: open this point at full resolution.
+    point_activated = Signal(int)
+    # The current selection, however it was made (click, shift-click, lasso).
+    # Empty when cleared. One signal for all three so the explorer has exactly
+    # one place to keep the preview column in sync.
     points_selected = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -144,6 +158,8 @@ class EmbeddingScatter(QWidget):
 
         # -- lasso
         self.lasso_enabled = False
+        # Whether the next lasso adds to the selection or replaces it.
+        self._lasso_additive = False
         self._lasso_points: list[tuple[float, float]] = []
         self._lasso_curve = pg.PlotCurveItem(
             pen=pg.mkPen(TEXT, width=1.5, style=Qt.PenStyle.DashLine)
@@ -151,10 +167,14 @@ class EmbeddingScatter(QWidget):
         self._lasso_curve.setZValue(90)
         self.plot.addItem(self._lasso_curve)
 
-        # Points inside the last lasso, drawn over everything so the selection
-        # stays visible against whatever it was drawn on top of.
+        # The current selection, drawn over everything so it stays visible
+        # against whatever it was drawn on top of. Rings rather than filled
+        # marks: a filled dot hides the point's own colour, which is usually
+        # the very thing being compared.
         self._selection = pg.ScatterPlotItem(
-            size=7, brush=pg.mkBrush(QColor(TEXT)), pen=None
+            size=SELECTION_RING_PX,
+            brush=pg.mkBrush(None),
+            pen=pg.mkPen(SELECTION_COLOUR, width=2),
         )
         self._selection.setZValue(95)
         self.plot.addItem(self._selection)
@@ -233,10 +253,11 @@ class EmbeddingScatter(QWidget):
             self.plot.addItem(item)
             self._items.append(item)
 
-        # A selection indexes rows that may not be on screen any more.
-        self.selected_rows = np.empty(0, dtype=np.int64)
-        self._selection.hide()
-        self._lasso_curve.setData([], [])
+        # Selection is kept across a redraw: filtering or recolouring must not
+        # silently discard a cluster the user has just chosen. It is stored in
+        # row space, so it survives the positions changing; only the rings are
+        # recomputed against what is now drawn.
+        self._draw_selection()
 
         for item in self._items:
             item.setVisible(not self.density_enabled)
@@ -340,9 +361,10 @@ class EmbeddingScatter(QWidget):
 
     # -- lasso ------------------------------------------------------------
 
-    def set_lasso(self, enabled: bool) -> None:
+    def set_lasso(self, enabled: bool, *, additive: bool = False) -> None:
         """Turn freehand selection on. Panning is disabled while it is."""
         self.lasso_enabled = enabled
+        self._lasso_additive = additive
         self._lasso_points = []
         self._lasso_curve.setData([], [])
         # The view box would otherwise pan under the same drag that draws.
@@ -352,10 +374,74 @@ class EmbeddingScatter(QWidget):
         )
 
     def clear_selection(self) -> None:
-        self.selected_rows = np.empty(0, dtype=np.int64)
-        self._selection.hide()
+        self.set_selection(np.empty(0, dtype=np.int64))
         self._lasso_curve.setData([], [])
-        self.points_selected.emit(self.selected_rows)
+
+    def set_selection(self, rows, *, notify: bool = True) -> None:
+        """Make ``rows`` the selection and redraw the rings.
+
+        Takes frame row indices, not positions, so a selection survives
+        filtering and recolouring: the same points stay selected even though
+        their positions in the drawn arrays have changed. Points that are no
+        longer on screen stay in the selection but draw nothing, which is what
+        keeps a lasso'd cluster intact while you filter within it.
+        """
+        rows = np.unique(np.asarray(rows, dtype=np.int64).ravel())
+        self.selected_rows = rows
+        self._draw_selection()
+        if notify:
+            self.points_selected.emit(self.selected_rows)
+
+    def toggle_selection(self, row: int, *, notify: bool = True) -> None:
+        """Add ``row`` to the selection, or remove it if already there.
+
+        Toggle rather than add: shift-clicking a selected point is the natural
+        way to take it back out, and it means the same gesture both builds and
+        corrects a selection.
+        """
+        row = int(row)
+        if row in self.selected_rows:
+            rows = self.selected_rows[self.selected_rows != row]
+        else:
+            rows = np.append(self.selected_rows, row)
+        self.set_selection(rows, notify=notify)
+
+    def set_hover_marker(self, row: int) -> None:
+        """Ring one row the way hovering it would, from outside the plot.
+
+        Lets the preview column point back at the plot: clicking an entry says
+        "this one", and the plot has to be able to show which. Silently does
+        nothing when the row is filtered out, which is the honest answer -- it
+        is genuinely not on screen.
+        """
+        if len(self._rows) == 0:
+            return
+        found = np.flatnonzero(self._rows == int(row))
+        if len(found) == 0:
+            self._highlight.hide()
+            return
+        index = int(found[0])
+        self._highlight.setData(
+            x=[float(self._coords[index, 0])], y=[float(self._coords[index, 1])]
+        )
+        self._highlight.show()
+
+    def _draw_selection(self) -> None:
+        """Ring whichever selected points are currently drawn."""
+        if len(self.selected_rows) == 0 or len(self._coords) == 0:
+            self._selection.hide()
+            return
+        # Selection is in row space and the plot in position space; map across
+        # with a membership test rather than a loop, since a lasso can hold
+        # tens of thousands of rows.
+        visible = np.flatnonzero(np.isin(self._rows, self.selected_rows))
+        if len(visible) == 0:
+            self._selection.hide()
+            return
+        self._selection.setData(
+            x=self._coords[visible, 0], y=self._coords[visible, 1]
+        )
+        self._selection.show()
 
     def _lasso_move(self, position) -> None:
         point = self.plot.getViewBox().mapSceneToView(position)
@@ -398,17 +484,11 @@ class EmbeddingScatter(QWidget):
         closed = np.asarray(path_points + [path_points[0]])
         self._lasso_curve.setData(closed[:, 0], closed[:, 1])
 
-        if not hits:
-            self.selected_rows = np.empty(0, dtype=np.int64)
-            self._selection.hide()
-        else:
-            picked = np.asarray(hits, dtype=np.int64)
-            self._selection.setData(
-                x=self._coords[picked, 0], y=self._coords[picked, 1]
-            )
-            self._selection.show()
-            self.selected_rows = self._rows[picked]
-        self.points_selected.emit(self.selected_rows)
+        picked = np.asarray(hits, dtype=np.int64)
+        rows = self._rows[picked] if len(picked) else np.empty(0, dtype=np.int64)
+        if self._lasso_additive:
+            rows = np.union1d(self.selected_rows, rows)
+        self.set_selection(rows)
 
     # -- interaction ------------------------------------------------------
 
@@ -464,9 +544,30 @@ class EmbeddingScatter(QWidget):
                 self._lasso_points = [(point.x(), point.y())]
             return
         index = self._nearest(event.scenePos())
-        if index >= 0:
-            event.accept()
-            self.point_clicked.emit(int(self._rows[index]))
+        if index < 0:
+            # A click on empty space clears the selection, which is the only
+            # gesture that does not require aiming at something.
+            if not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                if len(self.selected_rows):
+                    event.accept()
+                    self.clear_selection()
+            return
+
+        event.accept()
+        row = int(self._rows[index])
+
+        # pyqtgraph reports a double click on the SECOND press, having already
+        # delivered the first as a normal click. So the first click has
+        # selected the point; opening it here is consistent either way.
+        if event.double():
+            self.point_activated.emit(row)
+            return
+
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            self.toggle_selection(row)
+        else:
+            self.set_selection(np.asarray([row], dtype=np.int64))
+        self.point_clicked.emit(row)
 
     def reset_view(self) -> None:
         self.plot.getViewBox().autoRange(padding=0.05)
