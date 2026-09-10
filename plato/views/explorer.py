@@ -142,6 +142,47 @@ MAX_FILTER_VALUES = 120
 # works on exactly one machine. See plato.data.locations.
 
 
+class _WorkerSignals(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+    # (fraction 0..1, phase) from the backend's own reporting.
+    advanced = Signal(float, str)
+
+
+class _ProjectionTask(QRunnable):
+    """Runs one projection off the GUI thread."""
+
+    def __init__(self, vectors, params, fingerprint, cache, signals) -> None:
+        super().__init__()
+        self._vectors = vectors
+        self._params = params
+        self._fingerprint = fingerprint
+        self._cache = cache
+        self._signals = signals
+
+    def run(self) -> None:  # pragma: no cover - worker thread
+        try:
+            result = project(
+                self._vectors,
+                self._params,
+                fingerprint=self._fingerprint,
+                cache=self._cache,
+                progress=self._signals.progress.emit,
+                on_progress=self._signals.advanced.emit,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+            try:
+                self._signals.failed.emit(str(exc))
+            except RuntimeError:
+                pass
+            return
+        try:
+            self._signals.finished.emit(result)
+        except RuntimeError:
+            pass
+
+
 class _WarmUpTask(QRunnable):
     """Compiles the projection backend's kernels off the GUI thread."""
 

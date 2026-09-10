@@ -785,3 +785,109 @@ def test_normalised_data_searches_with_euclidean():
     # Anything else passes through untouched.
     assert effective_metric(ProjectionParams(metric="euclidean", normalize=True)) == "euclidean"
     assert effective_metric(ProjectionParams(metric="manhattan", normalize=True)) == "manhattan"
+
+
+# -- the worker path the Compute button actually takes -----------------------
+#
+# Every projection test above calls project() directly, which is why all 158
+# of them passed while the explorer was hard-broken: a refactor overwrote
+# _ProjectionTask and _WorkerSignals, so pressing Compute raised NameError on
+# the GUI thread and the bar sat at "starting…" forever. These cover the wiring
+# between the button and the function, not the function.
+
+
+def test_explorer_defines_every_name_it_uses():
+    """No reference in the module resolves to nothing.
+
+    A NameError inside a Qt slot does not reach a test that never invokes the
+    slot -- it surfaces as a UI that quietly does nothing. Checking the module
+    is closed under its own references catches that class of breakage for the
+    whole file at once, however it is introduced.
+    """
+    import ast
+    import builtins
+    from pathlib import Path
+
+    source = Path("plato/views/explorer.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    defined = set(dir(builtins))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            defined.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            defined.add(node.id)
+        elif isinstance(node, ast.arg):
+            defined.add(node.arg)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                defined.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            defined.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            defined.update(node.names)
+
+    # Module-level names only; attributes (self.foo) are not resolvable here.
+    used = {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    missing = sorted(name for name in used - defined if not name.startswith("__"))
+    assert not missing, f"explorer.py references undefined names: {missing}"
+
+
+def test_projection_task_reports_progress_and_finishes(tmp_path):
+    """The worker the Compute button starts must actually drive the bar.
+
+    Asserts the two things the stuck-at-"starting" bug broke: that the task
+    runs at all, and that it emits rising fractions rather than only a final
+    result.
+    """
+    pytest.importorskip("umap")
+    from plato.data.projection import ProjectionCache, ProjectionParams
+    from plato.views.explorer import _ProjectionTask, _WorkerSignals
+
+    rng = np.random.default_rng(0)
+    vectors = np.vstack(
+        [rng.normal(6, 1, (60, 8)), rng.normal(-6, 1, (60, 8))]
+    ).astype(np.float32)
+
+    # Run the QRunnable's body directly: no event loop, so this stays a unit
+    # test, but it is the same code path the thread pool executes.
+    seen: list[tuple[float, str]] = []
+    finished: list[object] = []
+    failed: list[str] = []
+
+    class _Recorder:
+        """Stands in for the Qt signals, recording instead of emitting."""
+
+        class _Slot:
+            def __init__(self, sink):
+                self.emit = sink
+
+        def __init__(self):
+            self.progress = self._Slot(lambda _text: None)
+            self.advanced = self._Slot(lambda f, m: seen.append((f, m)))
+            self.finished = self._Slot(finished.append)
+            self.failed = self._Slot(failed.append)
+
+    params = ProjectionParams(n_neighbors=5, pca_components=0)
+    task = _ProjectionTask(
+        vectors, params, "wiring", ProjectionCache(tmp_path / "proj"), _Recorder()
+    )
+    task.run()
+
+    assert not failed, failed
+    assert len(finished) == 1
+    assert finished[0].coords.shape == (120, 2)
+
+    fractions = [fraction for fraction, _ in seen]
+    assert fractions, "the progress bar would never leave 'starting…'"
+    assert fractions == sorted(fractions), "progress must never go backwards"
+    assert max(fractions) > 0.5
+
+    # The signal names the task uses must exist on the real signals object,
+    # which the recorder above cannot verify.
+    for name in ("progress", "advanced", "finished", "failed"):
+        assert hasattr(_WorkerSignals(), name)
