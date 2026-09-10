@@ -93,6 +93,7 @@ from ..gui.theme import BORDER, SURFACE, TEXT, TEXT_FAINT, TEXT_MUTED
 from ..gui.viewer import ImageWindow
 from .palette import UNKNOWN_COLOUR, colours_for, is_unknown, sort_values
 from .cluster_panel import ClusterPanel
+from .metadata_panel import MetadataPanel
 from .stats_panel import StatsPanel
 from .selection_panel import SelectionPanel
 from .scatter import EmbeddingScatter
@@ -102,6 +103,10 @@ from .scatter import EmbeddingScatter
 MAX_LEGEND_ENTRIES = 24
 
 COMPUTED_FROM_PLATES = "<loaded-plates>"
+
+# Cache sentinel: None is a real answer ("looked, not found"), so it cannot
+# double as "not looked up yet".
+_MISSING = object()
 
 # Most columns a single comparison window will open. Each column decodes and
 # holds its own image, so an unbounded comparison of a 5,000-point lasso would
@@ -306,6 +311,13 @@ class EmbeddingExplorer(QWidget):
         self._stats_signals = None
         # Which statistic is colouring the plot, or None for metadata.
         self._stat_column: str | None = None
+        # Whether points are traced back to micrographs at all. When off, no
+        # resolver is hunted, no path is resolved and no pixel is read -- see
+        # set_image_mode. Selection, lasso analysis and filtering are
+        # unaffected, because none of them touch an image.
+        self._image_mode = True
+        # row -> resolved path, memoising the filesystem stat behind it.
+        self._path_cache: dict[int, Path | None] = {}
         self._windows: list[ImageWindow] = []
         self._busy = False
         self._cancelled = False
@@ -622,6 +634,20 @@ class EmbeddingExplorer(QWidget):
         self.count_label = QLabel("—")
         self.count_label.setStyleSheet(f"color: {TEXT_MUTED};")
 
+        # A global switch, in the toolbar rather than buried in a group, since
+        # it changes what the whole right-hand half of the window is for.
+        self.image_mode_box = QCheckBox("Image viewer")
+        self.image_mode_box.setChecked(True)
+        self.image_mode_box.setToolTip(
+            "On: points trace back to their micrographs — previews, the "
+            "detail viewer and comparison all work.\n\n"
+            "Off: the explorer is a pure embedding/metadata tool. No image "
+            "root is searched, no path is resolved and no pixel is read, "
+            "which matters most on a network share. Selection, lasso "
+            "analysis and filtering are unaffected."
+        )
+        self.image_mode_box.toggled.connect(self.set_image_mode)
+
         reset_view = QPushButton("Reset view")
         reset_view.clicked.connect(self.scatter.reset_view)
         export_png = QPushButton("Export PNG…")
@@ -632,6 +658,7 @@ class EmbeddingExplorer(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(10, 6, 10, 6)
         toolbar.addWidget(self.count_label, 1)
+        toolbar.addWidget(self.image_mode_box)
         toolbar.addWidget(reset_view)
         toolbar.addWidget(export_png)
         toolbar.addWidget(export_svg)
@@ -657,10 +684,24 @@ class EmbeddingExplorer(QWidget):
         self.selection_panel.compare_requested.connect(self.compare_selection)
         self.selection_panel.reveal_failed.connect(self.status.emit)
 
-        right_container = self.selection_panel
+        # With images off the right column shows the selection's metadata
+        # instead of its pixels, so the panel still answers "what did I just
+        # select?" rather than vanishing and leaving dead space.
+        self.metadata_panel = MetadataPanel()
+        self.metadata_panel.compare_requested.connect(self.compare_selection)
+        self.metadata_panel.selection_changed.connect(self._on_panel_edited)
+        self.metadata_panel.hide()
+
+        right_container = QWidget()
+        right_layout = QVBoxLayout()
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(self.selection_panel)
+        right_layout.addWidget(self.metadata_panel)
+        right_container.setLayout(right_layout)
         # No maximum: the column is meant to be dragged wide when you want to
         # look closely, which is the point of making it resizable at all.
         right_container.setMinimumWidth(200)
+        self._right_container = right_container
 
         self.splitter = QSplitter()
         self.splitter.addWidget(left_scroll)
@@ -801,6 +842,7 @@ class EmbeddingExplorer(QWidget):
             return
 
         self.resolver = dialog.resolver
+        self._invalidate_paths()
         self.ambiguous_roots = []
         self._resolving = False
         root = self.resolver.root
@@ -884,10 +926,12 @@ class EmbeddingExplorer(QWidget):
             moa_table=self.moa_table,
             pathway_table=self.pathway_table,
         )
+        self._invalidate_paths()
         self.resolver = self._start_resolving_images(self.frame)
         self._update_source_label()
         self.result = None
         self.apply_suggested_params()
+        self.metadata_panel.set_frame(self.frame)
         self._rebuild_colour_options()
         self._rebuild_filters()
         self._update_points_hint()
@@ -954,9 +998,11 @@ class EmbeddingExplorer(QWidget):
             dataset, moa_table=self.moa_table, pathway_table=self.pathway_table
         )
         self.resolver = resolver
+        self._invalidate_paths()
         self._update_source_label()
         self.result = None
         self.apply_suggested_params()
+        self.metadata_panel.set_frame(self.frame)
         self._rebuild_colour_options()
         self._rebuild_filters()
         self._update_points_hint()
@@ -1006,10 +1052,12 @@ class EmbeddingExplorer(QWidget):
         )
         # The images are the ones already loaded, so the browser's own paths
         # answer this without a search.
+        self._invalidate_paths()
         self.resolver = self._start_resolving_images(self.frame)
         self._update_source_label()
         self.result = None
         self.apply_suggested_params()
+        self.metadata_panel.set_frame(self.frame)
         self._rebuild_colour_options()
         self._rebuild_filters()
         self._update_points_hint()
@@ -1069,6 +1117,11 @@ class EmbeddingExplorer(QWidget):
         return candidates
 
     def _start_resolving_images(self, frame) -> ImageResolver | None:
+        # With images off there is nothing to resolve for, and the hunt is the
+        # single most expensive thing that happens when a dataset loads.
+        if not self._image_mode:
+            return None
+
         """Return a cached resolver, or start hunting for one in the background.
 
         Returns immediately either way; when the hunt finishes the resolver
@@ -1101,6 +1154,7 @@ class EmbeddingExplorer(QWidget):
             return
         self._resolving = False
         self.resolver = resolver
+        self._invalidate_paths()
         self._update_source_label()
 
     def _resolve_images(self, frame) -> ImageResolver | None:
@@ -1513,6 +1567,49 @@ class EmbeddingExplorer(QWidget):
         if enabled:
             self.status.emit("click to start an outline, click again to close it")
 
+    def set_image_mode(self, enabled: bool) -> None:
+        """Turn image tracing on or off for the whole explorer.
+
+        Off is a real optimisation, not a hidden panel: ``_path_for`` returns
+        None immediately, so nothing resolves a path or reads a file, and no
+        background hunt for an image root is started when a dataset loads.
+        On a network share that hunt is ~0.3 s per candidate directory and the
+        reads are hundreds of megabytes, so this is the difference between a
+        metadata session that opens instantly and one that does not.
+        """
+        enabled = bool(enabled)
+        if enabled == self._image_mode:
+            return
+        self._image_mode = enabled
+
+        if self.image_mode_box.isChecked() != enabled:
+            self.image_mode_box.blockSignals(True)
+            self.image_mode_box.setChecked(enabled)
+            self.image_mode_box.blockSignals(False)
+
+        self.selection_panel.setVisible(enabled)
+        self.metadata_panel.setVisible(not enabled)
+        self.source_button.setEnabled(enabled)
+        self.stats_panel.setEnabled(enabled)
+
+        rows = self.scatter.selected_rows
+        if enabled:
+            # Coming back on: the root was never hunted while off, so start
+            # now rather than leaving previews permanently "not found".
+            if self.frame is not None and self.resolver is None:
+                self._invalidate_paths()
+                self.resolver = self._start_resolving_images(self.frame)
+            self.selection_panel.set_rows(rows)
+            self.status.emit("image viewer on")
+        else:
+            self.metadata_panel.set_rows(rows)
+            self.status.emit("image viewer off — embedding and metadata only")
+        self._update_source_label()
+
+    @property
+    def image_mode(self) -> bool:
+        return self._image_mode
+
     def _compute_image_stats(self) -> None:
         """Measure every image in the dataset, on the thread pool."""
         if self.frame is None or self.dataset is None:
@@ -1620,7 +1717,10 @@ class EmbeddingExplorer(QWidget):
         disagree about what is selected.
         """
         rows = np.asarray(rows, dtype=np.int64).ravel() if rows is not None else np.empty(0, np.int64)
-        self.selection_panel.set_rows(rows)
+        if self._image_mode:
+            self.selection_panel.set_rows(rows)
+        else:
+            self.metadata_panel.set_rows(rows)
         self._update_composition(rows)
         if len(rows):
             self.status.emit(f"{len(rows):,} point{'s' if len(rows) != 1 else ''} selected")
@@ -1805,9 +1905,30 @@ class EmbeddingExplorer(QWidget):
         return "<br>".join(parts)
 
     def _path_for(self, row_index: int) -> Path | None:
-        if self.resolver is None or self.frame is None:
+        """Where this point's image is, or None.
+
+        The single chokepoint for image resolution, so the mode switch is
+        enforced in exactly one place: with the image viewer off nothing below
+        this line runs, however it was reached.
+
+        Memoised, because resolving is a filesystem stat and the same row is
+        asked for by several panels at once -- measured at two lookups per
+        selected point before this cache. Cleared whenever the resolver or the
+        frame changes, since both change what the answer is.
+        """
+        if not self._image_mode or self.resolver is None or self.frame is None:
             return None
-        return self.resolver.path_for(self.frame.iloc[row_index])
+        row_index = int(row_index)
+        cached = self._path_cache.get(row_index, _MISSING)
+        if cached is not _MISSING:
+            return cached
+        path = self.resolver.path_for(self.frame.iloc[row_index])
+        self._path_cache[row_index] = path
+        return path
+
+    def _invalidate_paths(self) -> None:
+        """Forget resolved paths. Call when the resolver or frame changes."""
+        self._path_cache.clear()
 
     def _on_hover(self, row_index: int) -> None:
         """Hovering names the point in the status bar; it no longer loads it.

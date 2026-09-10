@@ -357,3 +357,107 @@ def test_a_cancelled_stats_run_delivers_nothing():
     run.cancel()
     run.chunk_finished(5)
     assert delivered == []
+
+
+# -- image viewer on/off -----------------------------------------------------
+
+
+class _CountingResolver:
+    """Records how often a path is actually resolved."""
+
+    def __init__(self):
+        self.calls = 0
+        from pathlib import Path
+
+        self.root = Path("/fake")
+
+    def path_for(self, record):
+        from pathlib import Path
+
+        self.calls += 1
+        return Path("/fake/img.tif")
+
+
+@pytest.fixture
+def explorer(app, tmp_path):
+    from plato.views.explorer import EmbeddingExplorer
+
+    class _Session:
+        pass
+
+    widget = EmbeddingExplorer(_Session(), tmp_path)
+    frame = pd.DataFrame(
+        {
+            "condition": [f"c{i % 4}" for i in range(50)],
+            "gene": ["acrB"] * 25 + ["tolC"] * 25,
+            "image_name": [f"img_{i}.tif" for i in range(50)],
+        }
+    )
+    widget.frame = frame
+    widget.metadata_panel.set_frame(frame)
+    widget.resolver = _CountingResolver()
+    return widget
+
+
+def test_image_mode_off_resolves_nothing(explorer):
+    """The requirement: OFF must be a real optimisation, not hidden UI."""
+    explorer.set_image_mode(False)
+    explorer.resolver.calls = 0
+
+    explorer.scatter.set_selection(np.arange(10))
+    assert explorer.resolver.calls == 0
+    # However it is reached, not just through the panel.
+    assert explorer._path_for(3) is None
+    assert explorer.resolver.calls == 0
+
+
+def test_image_mode_off_starts_no_root_hunt(explorer):
+    """The hunt is ~0.3s per candidate directory on a share."""
+    explorer.set_image_mode(False)
+    assert explorer._start_resolving_images(explorer.frame) is None
+
+
+def test_image_mode_on_does_resolve(explorer):
+    explorer.set_image_mode(True)
+    explorer.resolver.calls = 0
+    explorer._path_for(1)
+    assert explorer.resolver.calls == 1
+
+
+def test_paths_are_resolved_once_per_row(explorer):
+    """Several panels ask for the same row; the filesystem should not."""
+    explorer.set_image_mode(True)
+    explorer.resolver.calls = 0
+    for _ in range(5):
+        explorer._path_for(7)
+    assert explorer.resolver.calls == 1
+
+
+def test_changing_resolver_invalidates_cached_paths(explorer):
+    explorer.set_image_mode(True)
+    explorer._path_for(2)
+    explorer.resolver = _CountingResolver()
+    explorer._invalidate_paths()
+    explorer._path_for(2)
+    assert explorer.resolver.calls == 1, "a new resolver must be consulted"
+
+
+def test_selection_survives_toggling_image_mode(explorer):
+    explorer.set_image_mode(True)
+    explorer.scatter.set_selection(np.arange(8))
+    before = explorer.scatter.selected_rows.copy()
+
+    explorer.set_image_mode(False)
+    assert np.array_equal(explorer.scatter.selected_rows, before)
+    assert explorer.metadata_panel.table.rowCount() == 8
+
+    explorer.set_image_mode(True)
+    assert np.array_equal(explorer.scatter.selected_rows, before)
+    assert explorer.selection_panel.rows == before.tolist()
+
+
+def test_analysis_still_works_with_images_off(explorer):
+    explorer.set_image_mode(False)
+    explorer.scatter.set_selection(np.arange(25))
+    blocks = [b.summary.label for b in explorer.cluster_panel._blocks]
+    assert blocks, "lasso analysis must not depend on images"
