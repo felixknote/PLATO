@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -994,21 +995,68 @@ class EmbeddingExplorer(QWidget):
         self.dataset_box.blockSignals(False)
 
     def _browse_for_dataset(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(self, "Choose an embeddings folder")
-        if not chosen:
+        """Add one or more folders of embeddings/plates to this session.
+
+        Recursive and multi-root, unlike a bare folder picker: a lab drive is
+        rarely organised as one folder holding exactly the datasets wanted,
+        and a user should not have to know the exact level in advance. See
+        plato.views.load_data_dialog and plato.data.discovery.
+        """
+        from ..data.locations import EMBEDDING_ROOT
+        from .load_data_dialog import LoadDataDialog
+
+        start = get_root(EMBEDDING_ROOT)
+        dialog = LoadDataDialog(self, start=Path(start) if start else None)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        path = Path(chosen)
-        # Accept either a dataset directory or a parent holding several.
-        directories = discover_datasets(path)
-        if not directories:
+
+        embeddings, plates = dialog.selected()
+        if not embeddings and not plates:
+            return
+
+        loaded, failed = 0, []
+        for directory in embeddings:
+            if self._load_embedding_directory(directory, announce=False):
+                loaded += 1
+            else:
+                failed.append(directory.name)
+
+        self._sync_open_box()
+        if loaded and self.workspace.current is not None:
+            # Land on the last one loaded rather than whatever was current
+            # before -- that is what "just loaded" means to the user.
+            self.open_box.setCurrentIndex(self.open_box.count() - 1)
+            self._on_open_changed()
+
+        summary = f"loaded {loaded} embedding{'s' if loaded != 1 else ''}"
+        if failed:
+            summary += f" — {len(failed)} failed: {', '.join(failed[:3])}"
+            if len(failed) > 3:
+                summary += f" (+{len(failed) - 3} more)"
+        self.status.emit(summary)
+
+        if plates:
+            # A plate needs a plate map, which discovery cannot guess -- an
+            # image folder alone does not say which file is the map or how
+            # its columns are laid out. Point at the folder found and hand
+            # off to the dialog that actually asks for the map, rather than
+            # guessing and silently loading the wrong thing.
+            names = "\n".join(f"  {p}" for p in plates[:8])
+            more = f"\n  (+{len(plates) - 8} more)" if len(plates) > 8 else ""
             QMessageBox.information(
                 self,
-                "Embeddings",
-                f"No embedding export found in\n{path}\n\n"
-                "Expected a folder containing features_metadata.csv.",
+                "Plate image folders found",
+                f"{len(plates)} folder(s) look like plate images, but "
+                "loading a plate also needs its plate map, which a scan "
+                "cannot determine on its own:\n\n"
+                f"{names}{more}\n\n"
+                "Use Data → Load Data in the Plate Browser tab to add "
+                "one, pointing it at the folder above.",
             )
-            return
-        self.set_dataset_root(path)
+        elif not loaded:
+            QMessageBox.information(
+                self, "Load data", "Nothing was loaded — check the selection."
+            )
 
     def _browse_for_source_data(self) -> None:
         """Point this dataset at its images, with the dialog doing the work.
@@ -1088,61 +1136,89 @@ class EmbeddingExplorer(QWidget):
         if directory == COMPUTED_FROM_PLATES:
             self._load_computed_dataset()
             return
+
+        # Already open in this session (loaded via this dropdown before, or
+        # via the multi-folder loader): switch to it instead of reloading
+        # and creating a duplicate entry for the same directory.
+        existing = self.workspace.find_by_directory(Path(directory))
+        if existing:
+            index = self.open_box.findData(existing[0].key)
+            if index >= 0:
+                self.open_box.setCurrentIndex(index)
+                return
+
+        self._load_embedding_directory(Path(directory), announce=True)
+
+    def _load_embedding_directory(self, directory: Path, *, announce: bool) -> bool:
+        """Load one embedding export and register it with the workspace.
+
+        Shared by the single-select dropdown and the multi-folder loader, so
+        both paths register entries, resolve images and rebuild the controls
+        identically. Returns whether the load succeeded; a failure updates
+        the message panel only when ``announce`` is set, since a bulk load
+        reports its own failures rather than overwriting its progress message
+        for every file that does not load.
+        """
         try:
-            self.dataset = load_dataset(Path(directory))
+            dataset = load_dataset(directory)
             self.compute_features_button.setVisible(False)
         except EmbeddingError as exc:
-            self.dataset = None
-            self.frame = None
-            self._clear_filters()
-            # An export whose metadata exists but whose vectors do not is not
-            # a dead end: the images it describes can be described directly,
-            # keeping all of its own annotation.
-            self._missing_vectors_dir = Path(directory)
-            self._set_message(
-                str(exc)
-                + "\n\nPLATO can describe the images themselves instead — "
-                "the export's own metadata is kept, so colouring by gene, "
-                "drug and MoA still works."
-            )
-            self.compute_features_button.setVisible(True)
-            self.status.emit("embeddings unavailable")
-            return
+            if announce:
+                self.dataset = None
+                self.frame = None
+                self._clear_filters()
+                # An export whose metadata exists but whose vectors do not is
+                # not a dead end: the images it describes can be described
+                # directly, keeping all of its own annotation.
+                self._missing_vectors_dir = directory
+                self._set_message(
+                    str(exc)
+                    + "\n\nPLATO can describe the images themselves instead — "
+                    "the export's own metadata is kept, so colouring by gene, "
+                    "drug and MoA still works."
+                )
+                self.compute_features_button.setVisible(True)
+                self.status.emit("embeddings unavailable")
+            return False
         except (OSError, ValueError) as exc:
-            self.dataset = None
-            self._set_message(f"Could not read this dataset:\n{exc}")
-            return
+            if announce:
+                self.dataset = None
+                self._set_message(f"Could not read this dataset:\n{exc}")
+            return False
 
-        self.frame, _ = build_frame(
-            self.dataset,
-            moa_table=self.moa_table,
-            pathway_table=self.pathway_table,
+        frame, _ = build_frame(
+            dataset, moa_table=self.moa_table, pathway_table=self.pathway_table
         )
+        self.dataset = dataset
+        self.frame = frame
         self._invalidate_paths()
-        self.resolver = self._start_resolving_images(self.frame)
-        self._register_entry(self.dataset, self.frame)
+        self.resolver = self._start_resolving_images(frame)
+        self._register_entry(dataset, frame)
         self._active_key = self.workspace.current_key
         self._update_source_label()
         self.result = None
         self.apply_suggested_params()
-        self.metadata_panel.set_frame(self.frame)
+        self.metadata_panel.set_frame(frame)
         self._rebuild_group_options()
         self._rebuild_shape_options()
         self._rebuild_colour_options()
         self._rebuild_palette_options()
         self._rebuild_filters()
         self._update_points_hint()
-        run = self.dataset.run_info.get("model", "")
-        self._set_message(
-            f"{self.dataset.name}: {self.dataset.n_points:,} points × "
-            f"{self.dataset.n_dimensions} dimensions"
-            f"{' · ' + str(run) if run else ''}\n\n"
-            "Choose a method and press Compute projection."
-        )
-        self.status.emit(
-            f"{self.dataset.name}: {self.dataset.n_points:,} embeddings"
-            + ("" if self.resolver else " · original images not found")
-        )
+
+        if announce:
+            run = dataset.run_info.get("model", "")
+            self._set_message(
+                f"{dataset.name}: {dataset.n_points:,} points × "
+                f"{dataset.n_dimensions} dimensions"
+                f"{' · ' + str(run) if run else ''}\n\n"
+                "Choose a method and press Compute projection."
+            )
+            self.status.emit(
+                f"{dataset.name}: {dataset.n_points:,} embeddings"
+                + ("" if self.resolver else " · original images not found")
+            )
+        return True
 
     def _compute_missing_features(self) -> None:
         """Describe an export's images when its vector file is missing."""
