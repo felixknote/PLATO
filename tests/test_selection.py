@@ -458,6 +458,32 @@ def test_selection_survives_toggling_image_mode(explorer):
 
 def test_analysis_still_works_with_images_off(explorer):
     explorer.set_image_mode(False)
+    explorer.scatter.set_lasso(True)
     explorer.scatter.set_selection(np.arange(25))
     blocks = [b.summary.label for b in explorer.cluster_panel._blocks]
     assert blocks, "lasso analysis must not depend on images"
+
+
+def test_clicking_does_not_trigger_cluster_analysis(explorer):
+    """A click/shift-click selection must not run the composition breakdown.
+
+    points_selected fires for both a plain click and a lasso; without gating
+    on lasso_enabled, selecting 1-3 points by clicking produced a "composition"
+    like "60% of the selection" for 3 points -- a comparison the panel exists
+    to make about a drawn REGION, not whichever points happen to be clicked.
+    """
+    assert not explorer.scatter.lasso_enabled
+    before = explorer.cluster_panel.summary_label.text()
+    explorer.scatter.set_selection(np.array([1, 2, 3]))
+    assert explorer.cluster_panel.summary_label.text() == before
+
+
+def test_turning_lasso_off_freezes_the_last_analysis(explorer):
+    """The last lasso result stays visible; it is not cleared by a click."""
+    explorer.scatter.set_lasso(True)
+    explorer.scatter.set_selection(np.arange(25))
+    snapshot = explorer.cluster_panel.summary_label.text()
+
+    explorer.scatter.set_lasso(False)
+    explorer.scatter.set_selection(np.array([26]))
+    assert explorer.cluster_panel.summary_label.text() == snapshot

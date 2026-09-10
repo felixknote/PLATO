@@ -2392,8 +2392,17 @@ class EmbeddingExplorer(QWidget):
             self.status.emit(f"{len(rows):,} point{'s' if len(rows) != 1 else ''} selected")
 
     def _update_composition(self, rows) -> None:
-        """Break the selection down for the Lasso Analysis panel."""
+        """Break the selection down for the Lasso Analysis panel.
+
+        Only while the lasso tool is active. points_selected fires for a
+        plain click and a shift-click too, and running the full composition
+        breakdown on a 1-5 point selection produced nonsense like "60% of
+        the selection" for 3 points -- a comparison the panel exists to make
+        about a REGION, not about whichever points happen to be clicked.
+        """
         if self.frame is None:
+            return
+        if not self.scatter.lasso_enabled:
             return
         from ..data.cluster_stats import compose
 
