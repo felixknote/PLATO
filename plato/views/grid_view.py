@@ -29,7 +29,9 @@ import math
 import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QFrame,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QScrollArea,
     QVBoxLayout,
@@ -38,6 +40,10 @@ from PySide6.QtWidgets import (
 
 from ..gui import themes
 from .scatter import EmbeddingScatter
+
+# Legend entries beyond this many wrap the strip past what a header row
+# should cost; past it the swatches are still correct, just not all shown.
+MAX_STRIP_ENTRIES = 16
 
 # Facets per page. Twelve 300px panels fill a large screen; beyond that they
 # stop being readable and paging is the honest answer.
@@ -97,6 +103,77 @@ class Facet(QWidget):
         self.title.setToolTip(label)
 
 
+class LegendStrip(QWidget):
+    """One shared colour legend above the grid, instead of per facet.
+
+    A facet colours the same field as the single plot, so its meaning is
+    identical everywhere on the page -- repeating the legend in all twelve
+    panels would say nothing twelve times, while every panel omitting it (the
+    previous behaviour) left the colours unreadable the moment colour-by and
+    display-by were different fields. One strip, read once, applies to every
+    panel below it.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._layout = QHBoxLayout()
+        self._layout.setContentsMargins(6, 2, 6, 2)
+        self._layout.setSpacing(14)
+        self.setLayout(self._layout)
+        # Tracked separately from isVisible(): that also depends on the whole
+        # ancestor chain being shown, which export must not care about -- a
+        # legend built for a window that happens to be minimised, or a grid
+        # under test with no top-level shown, still has entries to draw.
+        self.has_entries = False
+        self.hide()
+
+    def set_entries(self, entries: list[tuple[str, str]] | None) -> None:
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.has_entries = bool(entries)
+        if not entries:
+            self.hide()
+            return
+
+        colours = themes.current()
+        shown, overflow = entries[:MAX_STRIP_ENTRIES], len(entries) - MAX_STRIP_ENTRIES
+        for label, colour in shown:
+            entry = QWidget()
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(5)
+            swatch = QFrame()
+            swatch.setFixedSize(10, 10)
+            swatch.setStyleSheet(
+                f"background: {colour}; border-radius: 2px; border: none;"
+            )
+            text = QLabel(label)
+            text.setStyleSheet(f"color: {colours.text}; font-size: 11px;")
+            row.addWidget(swatch)
+            row.addWidget(text)
+            entry.setLayout(row)
+            self._layout.addWidget(entry)
+        if overflow > 0:
+            more = QLabel(f"+{overflow} more")
+            more.setStyleSheet(f"color: {colours.text_muted}; font-size: 11px;")
+            self._layout.addWidget(more)
+        self._layout.addStretch(1)
+        self.show()
+
+    def restyle(self) -> None:
+        colours = themes.current()
+        for i in range(self._layout.count()):
+            widget = self._layout.itemAt(i).widget()
+            if isinstance(widget, QLabel):
+                muted = widget.text().startswith("+")
+                colour = colours.text_muted if muted else colours.text
+                widget.setStyleSheet(f"color: {colour}; font-size: 11px;")
+
+
 class GridView(QWidget):
     """A page of facets over one grouping variable."""
 
@@ -120,20 +197,23 @@ class GridView(QWidget):
         self.message.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.message.setWordWrap(True)
 
+        self.legend = LegendStrip()
+
         self.grid = QGridLayout()
         self.grid.setContentsMargins(4, 4, 4, 4)
         self.grid.setSpacing(6)
-        container = QWidget()
-        container.setLayout(self.grid)
+        self._container = QWidget()
+        self._container.setLayout(self.grid)
 
         self.scroll = QScrollArea()
-        self.scroll.setWidget(container)
+        self.scroll.setWidget(self._container)
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QScrollArea.Shape.NoFrame)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.message)
+        layout.addWidget(self.legend)
         layout.addWidget(self.scroll, 1)
         self.setLayout(layout)
         self.restyle()
@@ -141,6 +221,7 @@ class GridView(QWidget):
     def restyle(self) -> None:
         colours = themes.current()
         self.message.setStyleSheet(f"color: {colours.text_muted}; padding: 12px;")
+        self.legend.restyle()
         for facet in self.facets:
             facet.restyle()
 
@@ -157,6 +238,7 @@ class GridView(QWidget):
         self._clear()
         self._groups = []
         self._page = 0
+        self.legend.set_entries(None)
 
     def set_groups(
         self,
@@ -216,12 +298,15 @@ class GridView(QWidget):
         symbols: list[str] | None = None,
         selected: np.ndarray | None = None,
         background: str | None = None,
+        legend_entries: list[tuple[str, str]] | None = None,
     ) -> None:
         """Draw the current page.
 
         ``coords``/``rows``/``colours`` cover ALL visible points; each facet
-        draws the subset its group indexes.
+        draws the subset its group indexes. ``legend_entries`` is shown once,
+        above every panel, rather than per facet -- see ``LegendStrip``.
         """
+        self.legend.set_entries(legend_entries)
         self._clear()
         groups = self.current_groups()
         if not groups:
@@ -284,6 +369,89 @@ class GridView(QWidget):
             facet.setParent(None)
             facet.deleteLater()
         self.facets.clear()
+
+    # -- export -----------------------------------------------------------
+
+    def export(self, path: str) -> None:
+        """Write the current page -- legend and every facet -- to one file.
+
+        A facet is a real pyqtgraph scene same as the single plot, but there
+        are several of them side by side, and pyqtgraph's exporters draw one
+        ``PlotItem`` at a time. So this composes the page a different way:
+        paint the legend strip and the facet container widgets, at their
+        current laid-out size, exactly as shown -- not the scroll viewport,
+        which would crop to whatever fits on screen and silently drop facets
+        below the fold.
+        """
+        from PySide6.QtCore import QPoint, QRectF, QSize
+        from PySide6.QtGui import QPainter, QPixmap
+
+        # The container's actual on-screen size, not sizeHint(), IF it is
+        # genuinely on screen: each Facet only sets a MINIMUM size and is
+        # stretched to fill the scroll viewport's width by QGridLayout, so
+        # sizeHint() reflects the layout's PREFERRED size, which can differ
+        # from its current stretched size in either direction -- panels on a
+        # wide window are stretched wider than sizeHint(), so exporting at
+        # sizeHint() would not match what the screen shows, and facet titles
+        # (elided to the panel's live width) would elide differently too. So
+        # this is an either/or, never a max() of the two: live geometry is
+        # authoritative whenever there is a real layout pass to read it from;
+        # sizeHint() is purely the fallback for when there is none, which is
+        # real -- a GridView under test, or the app's first render before its
+        # window has ever been shown. An unshown widget's width()/height()
+        # are not zero or otherwise safe to blend with sizeHint() -- Qt hands
+        # back a meaningless default (640x480) with no relation to the
+        # layout, so this never reads live geometry unless isVisible() is
+        # true.
+        on_screen = self.isVisible()
+        if on_screen:
+            width = max(self._container.width(), 1)
+            content_height = max(self._container.height(), 1)
+            legend_height = self.legend.height() if self.legend.has_entries else 0
+        else:
+            width = max(self._container.sizeHint().width(), 1)
+            content_height = max(self._container.sizeHint().height(), 1)
+            legend_height = (
+                self.legend.sizeHint().height() if self.legend.has_entries else 0
+            )
+        height = legend_height + content_height
+
+        if path.lower().endswith(".svg"):
+            from PySide6.QtSvg import QSvgGenerator
+
+            generator = QSvgGenerator()
+            generator.setFileName(path)
+            generator.setSize(QSize(width, height))
+            generator.setViewBox(QRectF(0, 0, width, height))
+            painter = QPainter(generator)
+        else:
+            pixmap = QPixmap(width, height)
+            pixmap.fill(self._page_background())
+            painter = QPainter(pixmap)
+
+        try:
+            if legend_height:
+                self.legend.render(painter, QPoint(0, 0))
+            painter.translate(0, legend_height)
+            self._container.render(painter, QPoint(0, 0))
+        finally:
+            painter.end()
+
+        if not path.lower().endswith(".svg"):
+            pixmap.save(path)
+
+    def _page_background(self):
+        """The fill behind facets that don't cover the whole canvas.
+
+        Only matters when panel counts don't tile the page rectangle exactly
+        (a page of 5 in a 3-column grid, say): the gap must match what facets
+        already show, not default to whatever QPixmap fills with.
+        """
+        from PySide6.QtGui import QColor
+
+        if self.facets:
+            return self.facets[0].scatter.background_colour()
+        return QColor(themes.current().plot_background)
 
 
 def build_groups(

@@ -484,6 +484,52 @@ def test_an_uncancelled_projection_still_caches(tmp_path):
     assert again.from_cache
 
 
+def test_clear_removes_every_cached_projection(tmp_path):
+    rng = np.random.default_rng(0)
+    vectors = rng.normal(size=(150, 12)).astype(np.float32)
+    cache = ProjectionCache(tmp_path / "proj")
+    params_a = ProjectionParams(method=UMAP, n_neighbors=10, pca_components=6)
+    params_b = ProjectionParams(method=UMAP, n_neighbors=20, pca_components=6)
+
+    project(vectors, params_a, fingerprint="abc", cache=cache)
+    project(vectors, params_b, fingerprint="abc", cache=cache)
+    assert len(cache.entries()) == 2
+    assert any(cache.directory.glob("*.npz"))
+
+    removed = cache.clear()
+
+    assert removed == 2
+    assert cache.entries() == []
+    assert not any(cache.directory.glob("*.npz"))
+    assert not any(cache.directory.glob("*.json"))
+
+    # And it must genuinely force a recompute, not just look empty.
+    again = project(vectors, params_a, fingerprint="abc", cache=cache)
+    assert not again.from_cache
+
+
+def test_clear_on_an_empty_or_missing_cache_is_a_harmless_noop(tmp_path):
+    cache = ProjectionCache(tmp_path / "never_created")
+    assert cache.clear() == 0
+
+    cache.directory.mkdir(parents=True)
+    assert cache.clear() == 0
+
+
+def test_clear_counts_an_orphaned_npz_without_its_json(tmp_path):
+    """An interrupted save (array written, metadata write never landed)
+    must still be swept up -- it is disk space this exists to reclaim, and
+    would otherwise never be counted or removed by anything else."""
+    cache = ProjectionCache(tmp_path / "proj")
+    cache.directory.mkdir(parents=True)
+    (cache.directory / "orphan.npz").write_bytes(b"not a real npz, just bytes")
+
+    removed = cache.clear()
+
+    assert removed == 1
+    assert not any(cache.directory.glob("*.npz"))
+
+
 def test_projection_subsamples(tmp_path):
     rng = np.random.default_rng(0)
     vectors = rng.normal(size=(300, 12)).astype(np.float32)
@@ -767,11 +813,25 @@ def test_projection_reports_progress():
 
 
 def test_suggested_neighbours_scale_with_the_dataset():
-    """The tuned 500 suits a 30k export and destroys a small one."""
+    """Sublinear (0.4*sqrt(n)), clamped to [15, 100] -- not the old linear
+    1.5%-of-n-clamped-to-500. With ~50-100 true conditions in this project's
+    30k-50k point exports, a condition is roughly a few hundred points; a
+    neighbourhood of 500 already spans several conditions and starts
+    averaging distinct phenotypes together before the projection sees them.
+
+    0.4*sqrt(n) is calibrated to land near 30 at 5,000 points, which a
+    silhouette-score sweep against a real 32,256-point DINO export (54
+    ground-truth perturbations) found to be a genuine interior peak, not
+    merely smaller-is-better down to a floor. See suggest()'s docstring.
+    """
     from plato.data.projection import suggest
 
-    assert suggest(36_288).n_neighbors == 500
-    assert suggest(24_192).n_neighbors < 500
+    assert suggest(100_000).n_neighbors == 100  # only the ceiling saturates now
+    assert suggest(36_288).n_neighbors < 100
+    assert suggest(6_000).n_neighbors < 100
+    # Two exports of comparable size must not collapse to one identical,
+    # coincidentally-clamped value the way the old linear-to-500 scaling did.
+    assert suggest(6_000).n_neighbors != suggest(20_000).n_neighbors
     small = suggest(300, learned=False)
     assert small.n_neighbors == 15
     # Never at or above the sample: every point being everyone's neighbour
@@ -798,13 +858,26 @@ def test_suggested_geometry_follows_the_vector_kind():
 
 
 def test_suggested_perplexity_stays_usable():
+    """Flat 4, not scaled with n. Contrary to general t-SNE literature
+    guidance (which would suggest perplexity in the hundreds for tens of
+    thousands of points), a direct silhouette-score sweep against a real
+    32,256-point DINO export (54 ground-truth perturbations) found
+    perplexity 3-5 clearly best at BOTH a 5,000-point subsample and the
+    full 32k-point scale -- the low-perplexity result was not a subsampling
+    artefact. See suggest()'s docstring for the full measurement."""
     from plato.data.projection import suggest
 
-    for n in (50, 500, 5_000, 50_000):
+    for n in (20, 50, 500, 5_000, 50_000):
         perplexity = suggest(n).perplexity
-        assert 10 <= perplexity <= 50
-        # openTSNE needs perplexity < n/3, which the runner also enforces.
+        assert 2 <= perplexity <= 4
+        # openTSNE needs perplexity < n/3, which the runner also enforces --
+        # but a SUGGESTED value should not already need that clamp itself.
         assert perplexity < max(5, n / 3)
+
+    assert suggest(50_000).perplexity == 4
+    # Only a genuinely tiny dataset pulls it below 4.
+    assert suggest(10).perplexity < 4
+    assert suggest(500).perplexity < 200
 
 
 def test_subsampling_only_kicks_in_when_it_has_to():

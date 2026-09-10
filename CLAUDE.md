@@ -55,11 +55,14 @@ plato/
 |---|---|
 | `explorer.py` | the Embedding Explorer: controls left, plot centre, selection right |
 | `scatter.py` | `EmbeddingScatter`: pyqtgraph plot, hover, click/shift-click, lasso, density |
+| `grid_view.py` | `GridView`: one facet per group, shared axes/legend, page export |
+| `tsne_panel.py` | `TsnePanel`: t-SNE's own parameters, presets, misread caveats |
 | `selection_panel.py` | right column: one cropped preview per selected point |
 | `cluster_panel.py` | Lasso Analysis: ranked composition of a selection |
 | `stats_panel.py` / `stats_worker.py` | opt-in image statistics + its progress |
 | `compare_view.py` | `ComparisonView`/`ComparisonColumn`, shared locked `Viewport` |
-| `palette.py` | categorical + continuous colour assignment |
+| `palette.py` | value -> colour/shape assignment, stable across filters |
+| `palettes.py` | the palette registry: every named categorical/sequential/diverging scale |
 | `browser.py`, `model.py`, `gallery.py`, `preview.py` | browser arm + shared decode |
 
 ## Invariants — break these and things go subtly wrong
@@ -102,3 +105,20 @@ widgets re-read their colours.
 - After L2-normalising, cosine and Euclidean give identical neighbours —
   ask for Euclidean, it has a fast path (measured 2.5× faster, ARI 1.000).
 - `QSettings` defaults only apply when nothing was saved before.
+- pyqtgraph draws same-z-value `ScatterPlotItem`s in ADD order, which for the
+  explorer's colour groups was alphabetical by category label -- so
+  whichever category sorted last always painted over every other one where
+  they overlapped. `scatter._draw_order` fixes this by chunking each colour
+  group and shuffling chunk order (not just group order) rather than one
+  colour fully occluding another; per-point brushes on a single item would
+  be correct too but cost ~25x more at 32k points (measured).
+- `QWidget.width()`/`.height()` on a widget that is not currently shown are
+  **not** zero or otherwise safe — Qt hands back a stale/default value
+  (observed: 640x480) unrelated to its actual layout. Never `max()` that
+  against `sizeHint()`; check `isVisible()` first and use live geometry only
+  when it is true, `sizeHint()` only when it is not (see `GridView.export`).
+- A `QComboBox`'s value->colour/shape mapping must be built from the FULL
+  column (`distinct_values`/`_colour_universe`), never from whichever rows
+  are currently visible after a filter — deriving it from the filtered
+  subset reassigns other categories' colours the moment one category is
+  filtered out, since assignment is by positional index into the palette.

@@ -107,7 +107,6 @@ from .palette import (
     colours_for,
     is_unknown,
     set_active_palette,
-    sort_values,
 )
 from .cluster_panel import ClusterPanel
 from .tsne_panel import TsnePanel
@@ -351,6 +350,12 @@ class EmbeddingExplorer(QWidget):
         self._image_mode = True
         # Facet variable, or None for a single plot.
         self._group_column: str | None = None
+        # Set once the user picks a categorical palette themselves, so a
+        # background change (which otherwise suggests the palette suited to
+        # the new ground -- see _on_background_changed) never overrides a
+        # deliberate choice. Same "explicit wins" precedent as the app's
+        # saved theme overriding OS theme detection.
+        self._palette_chosen_by_user = False
         # Which workspace entry the panel is currently showing.
         self._active_key: str | None = None
         # row -> resolved path, memoising the filesystem stat behind it.
@@ -464,6 +469,13 @@ class EmbeddingExplorer(QWidget):
 
         self.method_box = QComboBox()
         self.method_box.addItems(METHODS)
+        # t-SNE, not UMAP, is the standard starting method: for this kind of
+        # perturbation screen (tens of expected conditions, not a continuum)
+        # its cluster-preserving behaviour at a moderate perplexity reads
+        # more directly as "these images are alike" than UMAP's global-shape
+        # emphasis does, and it is the one already captioned with the
+        # how-to-read-this-safely caveats (see TsnePanel).
+        self.method_box.setCurrentText(TSNE)
 
         # Editable, because the suggested value scales with the dataset and
         # will usually not be one of the presets.
@@ -474,14 +486,6 @@ class EmbeddingExplorer(QWidget):
             "How much of the neighbourhood UMAP preserves.\n"
             "Low values emphasise local structure, high values global shape.\n"
             "Set from the dataset size when one is loaded."
-        )
-
-        self.perplexity_box = QComboBox()
-        self.perplexity_box.setEditable(True)
-        self.perplexity_box.addItems(["10", "30", "50", "100"])
-        self.perplexity_box.setToolTip(
-            "t-SNE's effective neighbourhood size.\n"
-            "Must stay below a third of the point count, which is enforced."
         )
 
         # Subsampling. A UMAP of 30k x 1024 is minutes; 5k is seconds, and for
@@ -554,7 +558,6 @@ class EmbeddingExplorer(QWidget):
         embedding_form.setContentsMargins(6, 4, 6, 4)
         embedding_form.addRow("Method", self.method_box)
         embedding_form.addRow("Neighbours", self.neighbours_box)
-        embedding_form.addRow("Perplexity", self.perplexity_box)
         points_column = QVBoxLayout()
         points_column.setContentsMargins(0, 0, 0, 0)
         points_column.setSpacing(4)
@@ -957,9 +960,6 @@ class EmbeddingExplorer(QWidget):
     def _sync_method_options(self) -> None:
         is_umap = self.method_box.currentText() == UMAP
         self.neighbours_box.setEnabled(is_umap)
-        # t-SNE's parameters live in their own panel, which replaces the
-        # single perplexity box whenever t-SNE is the method.
-        self.perplexity_box.setVisible(is_umap)
         self.tsne_group.setVisible(not is_umap)
 
     def _set_message(self, text: str) -> None:
@@ -1554,13 +1554,17 @@ class EmbeddingExplorer(QWidget):
         params = suggest(self.dataset.n_points, learned=learned)
         self._suggested = params
 
-        for box, value in (
-            (self.neighbours_box, str(params.n_neighbors)),
-            (self.perplexity_box, str(int(params.perplexity))),
-        ):
-            box.blockSignals(True)
-            box.setCurrentText(value)
-            box.blockSignals(False)
+        self.neighbours_box.blockSignals(True)
+        self.neighbours_box.setCurrentText(str(params.n_neighbors))
+        self.neighbours_box.blockSignals(False)
+
+        # t-SNE's own panel owns perplexity (and every other t-SNE knob) once
+        # it exists -- load_from applies the whole suggested ProjectionParams
+        # at once rather than perplexity alone, so a dataset that scales past
+        # the panel's hardcoded 500/250-iteration "Standard" preset gets a
+        # correspondingly larger iteration count too, not just a bigger
+        # perplexity with too few steps to converge on it.
+        self.tsne_panel.load_from(params)
 
         self.max_points_box.blockSignals(True)
         self.max_points_box.setCurrentText(
@@ -1654,12 +1658,13 @@ class EmbeddingExplorer(QWidget):
             metric=base.metric,
             n_neighbors=max(2, _number(self.neighbours_box, base.n_neighbors)),
             min_dist=base.min_dist,
-            perplexity=max(5.0, _number(self.perplexity_box, base.perplexity)),
             max_points=max_points,
             deterministic=self.deterministic_box.isChecked(),
         )
-        # The t-SNE panel is the authority on t-SNE's parameters when it is
-        # the active method, so the two cannot drift apart.
+        # The t-SNE panel is the sole authority on every t-SNE parameter,
+        # perplexity included -- there is no other control for it now that
+        # the old standalone perplexity box is gone (superseded by this
+        # panel; see apply_suggested_params).
         if params.method == TSNE:
             self.tsne_panel.apply_to(params)
         return params
@@ -1790,6 +1795,30 @@ class EmbeddingExplorer(QWidget):
         """Coalesce rapid control changes into one redraw."""
         self._redraw_timer.start()
 
+    def _colour_universe(self, column: str | None) -> list[str]:
+        """Every value ``column`` takes across the whole frame, unknowns last.
+
+        The basis for colour/shape assignment -- see ``_redraw`` and
+        ``_symbols_for``. ``distinct_values`` already excludes blanks (it
+        exists to feed filter checklists, where an empty-string row is not a
+        choice worth offering), but here that would make blank/unannotated
+        rows vanish from the legend and the draw loop entirely rather than
+        drawing grey, so any unknown-marker values actually present in the
+        column are appended, sorted after the known ones.
+        """
+        if not column or self.frame is None or column not in self.frame.columns:
+            return []
+        raw = self.frame[column].astype(str)
+        # distinct_values sorts plain-alphabetically and only excludes "" --
+        # other unknown markers ("nan", "unknown", the MoA/pathway sentinel)
+        # are real strings to it and would land wherever they alphabetise to.
+        # Pulled out here and appended last instead, so every unknown-marker
+        # value shares one grey slot at the end rather than scattering through
+        # the real categories.
+        known = [v for v in distinct_values(self.frame, column) if not is_unknown(v)]
+        unknowns = sorted({v for v in raw if is_unknown(v)})
+        return known + unknowns
+
     def _redraw(self, *_args, reset_view: bool = False) -> None:
         # A queued redraw may still be pending when an immediate one runs
         # (e.g. a fresh projection); dropping it avoids drawing twice.
@@ -1828,12 +1857,24 @@ class EmbeddingExplorer(QWidget):
 
         column = self.colour_box.currentData()
         values = subset[column].astype(str).to_numpy()[mask] if column else np.array([""] * len(coords))
-        ordered = sort_values(list(dict.fromkeys(values.tolist())))
-        mapping, continuous = colours_for(ordered)
+        # The colour->value mapping is built from every value the FULL frame
+        # carries for this column, not just what happens to be on screen after
+        # filtering. Deriving it from the visible subset would reassign
+        # colours every time a filter or facet changed which categories are
+        # present -- e.g. filtering out "Amikacin" would shift "Ampicillin"
+        # into its palette slot. Filtering must only ever hide points, never
+        # repaint the ones that remain.
+        universe = self._colour_universe(column)
+        mapping, continuous = colours_for(universe)
         if self.dim_others_box.isChecked():
-            for value in ordered:
+            for value in universe:
                 if is_unknown(value):
                     mapping[value] = UNKNOWN_COLOUR
+
+        # What is actually on screen right now -- a subset of the universe
+        # above once filters or a facet's page are in play. The mapping stays
+        # fixed to the universe; only which entries get drawn/listed narrows.
+        ordered = [v for v in universe if v in set(values.tolist())]
 
         # Group positions by colour in one pass. Several values can share a
         # colour (the palette wraps, and every unknown maps to grey), so
@@ -1983,6 +2024,14 @@ class EmbeddingExplorer(QWidget):
         page = self.grid.page
         self.grid.set_groups(groups_list, sort=self.grid_sort_box.currentData())
         self.grid.set_page(page)
+        # Colouring by the same field the grid is split on makes every facet
+        # monochrome -- the facet's own title already says which category it
+        # is, so a legend here would repeat that rather than add anything.
+        # Any other colour-by field is exactly the case the legend exists
+        # for: colour is carrying information the facet titles do not.
+        strip_entries = (
+            legend_entries if self.colour_box.currentData() != self._group_column else None
+        )
         self.grid.render(
             np.asarray(coords),
             np.asarray(visible),
@@ -1992,6 +2041,7 @@ class EmbeddingExplorer(QWidget):
             symbols=symbols,
             selected=self.scatter.selected_rows,
             background=self.background_box.currentData(),
+            legend_entries=strip_entries,
         )
         self._update_page_label()
         if skipped:
@@ -2005,10 +2055,13 @@ class EmbeddingExplorer(QWidget):
         if not column or self.frame is None or column not in self.frame.columns:
             return None
         values = self.frame.iloc[visible][column].astype(str).to_numpy()
-        ordered = sort_values(list(dict.fromkeys(values.tolist())))
-        mapping, overflow = shapes.assign(ordered)
+        # Same stability requirement as colour: assign from the full column,
+        # not from whatever happens to be visible, so a shape never shifts
+        # when a filter or facet page changes what is on screen.
+        universe = self._colour_universe(column)
+        mapping, overflow = shapes.assign(universe)
         if overflow:
-            self.shape_hint.setText(shapes.describe_overflow(overflow, len(ordered)))
+            self.shape_hint.setText(shapes.describe_overflow(overflow, len(universe)))
             self.shape_hint.show()
         else:
             self.shape_hint.hide()
@@ -2273,12 +2326,44 @@ class EmbeddingExplorer(QWidget):
         self.scatter.set_background(mode)
         for facet in self.grid.facets:
             facet.scatter.set_background(mode)
+        # Suggest the categorical palette suited to the new ground -- most of
+        # PLATO's default palette falls below readable contrast on white (see
+        # palettes.categorical_for_background) -- but only while the user has
+        # not picked a palette themselves. A deliberate choice must survive a
+        # background change exactly as it survives everything else. Applied
+        # with signals blocked and set_active_palette called directly, same
+        # as _rebuild_palette_options's own programmatic updates: routing it
+        # through _on_palette_changed would mark this suggestion itself as
+        # the user's "explicit" choice and defeat the whole guard.
+        if not self._palette_chosen_by_user and self.palette_box.currentData() in (
+            None,
+            *(p.key for p in palettes.of_kind(palettes.CATEGORICAL)),
+        ):
+            from ..gui import themes as _themes
+
+            suggested = palettes.categorical_for_background(
+                mode, theme_is_dark=_themes.is_dark()
+            )
+            index = self.palette_box.findData(suggested.key)
+            if index >= 0 and index != self.palette_box.currentIndex():
+                self.palette_box.blockSignals(True)
+                self.palette_box.setCurrentIndex(index)
+                self.palette_box.blockSignals(False)
+                set_active_palette(suggested.key)
+        self._redraw()
 
     def _on_palette_changed(self) -> None:
-        """Switch the active palette and repaint."""
+        """Switch the active palette and repaint.
+
+        Only reached by a real signal emission -- a user pick, since every
+        programmatic change to palette_box's current index in this file goes
+        through blockSignals. Safe to treat unconditionally as "the user
+        chose this" and stop overriding it on background changes.
+        """
         key = self.palette_box.currentData()
         if key:
             set_active_palette(key)
+        self._palette_chosen_by_user = True
         self._redraw()
 
     def _rebuild_palette_options(self) -> None:
@@ -2306,7 +2391,19 @@ class EmbeddingExplorer(QWidget):
                 )
         index = self.palette_box.findData(previous)
         if index < 0:
-            index = self.palette_box.findData(palettes.default_for(kinds[0]).key)
+            if numeric or self._palette_chosen_by_user:
+                default_key = palettes.default_for(kinds[0]).key
+            else:
+                # No remembered choice and the user has never overridden the
+                # palette: pick the one suited to the current background
+                # rather than unconditionally falling back to the dark-tuned
+                # default -- same reasoning as _on_background_changed.
+                from ..gui import themes as _themes
+
+                default_key = palettes.categorical_for_background(
+                    self.background_box.currentData(), theme_is_dark=_themes.is_dark()
+                ).key
+            index = self.palette_box.findData(default_key)
         self.palette_box.setCurrentIndex(max(0, index))
         self.palette_box.blockSignals(False)
         key = self.palette_box.currentData()
@@ -2818,7 +2915,12 @@ class EmbeddingExplorer(QWidget):
             return
         method = self.result.params.method.replace("-", "")
         column = self.colour_box.currentData() or "plot"
-        suggested = f"{method}_by_{column}.{fmt}"
+        faceting = bool(self._group_column)
+        suggested = (
+            f"{method}_by_{self._group_column}_grid.{fmt}"
+            if faceting
+            else f"{method}_by_{column}.{fmt}"
+        )
         filters = "PNG image (*.png)" if fmt == "png" else "SVG vector (*.svg)"
         target, _ = QFileDialog.getSaveFileName(self, f"Export {fmt.upper()}", suggested, filters)
         if not target:
@@ -2826,8 +2928,60 @@ class EmbeddingExplorer(QWidget):
         if not target.lower().endswith(f".{fmt}"):
             target = f"{target}.{fmt}"
         try:
-            self.scatter.export(target)
+            # Whichever view is actually on screen -- the single plot has its
+            # own scene, the grid is several, composed differently. Exporting
+            # the wrong one is what makes a saved file not match what a user
+            # was just looking at.
+            if faceting:
+                self.grid.export(target)
+            else:
+                self.scatter.export(target)
         except Exception as exc:  # noqa: BLE001 - report rather than crash
             QMessageBox.warning(self, "Export failed", str(exc))
             return
         self.status.emit(f"exported {target}")
+
+    # -- cache --------------------------------------------------------------
+
+    def clear_projection_cache(self) -> None:
+        """Delete every cached t-SNE/UMAP layout, on disk and in memory.
+
+        A projection of 30k points can take minutes, so this asks first --
+        the cache exists specifically to avoid paying that cost twice, and
+        clearing it is only useful after a code or data change makes the old
+        layouts suspect, not something to do by accident. Reached from the
+        Help menu because it is a whole-cache operation, not a per-embedding
+        one: one ProjectionCache backs every entry in this workspace (see
+        __init__), so there is nothing finer to target.
+        """
+        on_disk = self.cache.entries()
+        in_memory = sum(len(e.projections) for e in self.workspace.entries)
+        if not on_disk and not in_memory:
+            QMessageBox.information(
+                self, "Clear cached projections", "No cached projections to clear."
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Clear cached projections",
+            f"Delete {len(on_disk)} cached projection(s) from disk?\n\n"
+            "Any embedding shown from cache right now will need to be "
+            "recomputed the next time you view it, which can take minutes "
+            "for a large dataset.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        removed = self.cache.clear()
+        for entry in self.workspace.entries:
+            entry.projections.clear()
+            entry.last_result_key = None
+        # The plot on screen right now came from one of those projections --
+        # leaving it up would show a result that no longer exists anywhere,
+        # silently surviving until the next redraw picks a different one.
+        self.result = None
+        self._set_message("Cache cleared. Press Compute projection to lay it out again.")
+        self.status.emit(f"cleared {removed} cached projection(s)")

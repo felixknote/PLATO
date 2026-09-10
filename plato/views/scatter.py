@@ -83,6 +83,20 @@ BACKGROUND_CHOICES = (
 # their colour, so the selection is the only thing carrying hue.
 GREY_OUT_COLOUR = "#4a5058"
 
+# Each colour/symbol group is split into this many draw chunks, shuffled
+# together across groups -- see _draw_order in set_points. Higher means finer
+# interleaving (closer to true per-point randomness) at the cost of more
+# ScatterPlotItems; 12 is enough that no group forms a visible solid block
+# at typical point counts, while staying two orders of magnitude cheaper than
+# one item per point (per-point brushes benchmark ~25x slower at 32k points).
+DRAW_CHUNKS_PER_GROUP = 12
+
+# Fixed seed for the interleaving shuffle, so the same colouring redraws
+# identically rather than reshuffling which points land on top every time a
+# slider moves -- reproducibility here matters the same way the projection's
+# own seed does.
+_DRAW_ORDER_SEED = 20260910
+
 
 def _density_lookup_table() -> np.ndarray:
     """Background -> blue -> cyan -> amber, as a 256-entry RGB table.
@@ -118,6 +132,44 @@ def _density_lookup_table() -> np.ndarray:
 
 
 _DENSITY_LUT: np.ndarray | None = None
+
+
+def _draw_order(
+    batches: list[tuple[str, str, np.ndarray]],
+) -> list[tuple[str, str, np.ndarray]]:
+    """Split each (colour, symbol) batch into chunks and interleave them.
+
+    Every batch draws as its own item at the same z-value (see set_points),
+    so with only one item per colour, add order IS paint order: whichever
+    colour happens to sort last -- alphabetically, since that is how the
+    explorer orders colour groups for a stable legend -- always paints over
+    every other colour, everywhere the two overlap. On a genuinely mixed
+    region that makes one category look like it dominates when the true
+    split might be close to even; which category wins is an artefact of
+    string sorting, not a fact about the data.
+
+    Splitting each group into DRAW_CHUNKS_PER_GROUP pieces and shuffling the
+    chunk order (not just the group order) approximates true per-point
+    interleaving cheaply: a dense overlap region ends up with several
+    chunks from each colour scattered through the paint order, so neither
+    consistently occludes the other, without paying for one ScatterPlotItem
+    per point (per-point brushes benchmark ~25x slower at 32k points -- see
+    DRAW_CHUNKS_PER_GROUP's comment). The seed is fixed so a redraw with the
+    same groups reproduces the same interleaving rather than reshuffling
+    visibly on every slider tick.
+    """
+    rng = np.random.default_rng(_DRAW_ORDER_SEED)
+    chunked: list[tuple[str, str, np.ndarray]] = []
+    for colour, symbol, mask in batches:
+        if len(mask) == 0:
+            continue
+        order = rng.permutation(len(mask))
+        pieces = np.array_split(mask[order], min(DRAW_CHUNKS_PER_GROUP, len(mask)))
+        for piece in pieces:
+            if len(piece):
+                chunked.append((colour, symbol, piece))
+    order = rng.permutation(len(chunked))
+    return [chunked[i] for i in order]
 
 
 class EmbeddingScatter(QWidget):
@@ -292,7 +344,7 @@ class EmbeddingScatter(QWidget):
             for symbol in dict.fromkeys(marks.tolist()):
                 batches.append((colour, symbol, np.asarray(mask)[marks == symbol]))
 
-        for colour, symbol, mask in batches:
+        for colour, symbol, mask in _draw_order(batches):
             if len(mask) == 0:
                 continue
             brush_colour = QColor(colour)

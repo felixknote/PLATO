@@ -82,7 +82,7 @@ class TsnePanel(QWidget):
         # legitimately want several thousand iterations.
         self.iterations.setRange(50, 100_000)
         self.iterations.setSingleStep(250)
-        self.iterations.setValue(500)
+        self.iterations.setValue(750)
         self.iterations.setToolTip(
             "Gradient-descent steps after early exaggeration.\n"
             "Too few and the layout has not settled. There is no upper limit "
@@ -104,7 +104,11 @@ class TsnePanel(QWidget):
         self.perplexity = QDoubleSpinBox()
         self.perplexity.setRange(2.0, 5000.0)
         self.perplexity.setDecimals(1)
-        self.perplexity.setValue(30.0)
+        # 4, matching suggest()'s own empirically-measured default (see
+        # plato/data/projection.py) -- this construction-time value is only
+        # ever seen before a dataset is loaded and apply_suggested_params
+        # overwrites it via load_from().
+        self.perplexity.setValue(4.0)
         self.perplexity.setToolTip(
             "Roughly, how many neighbours each point is fitted against.\n\n"
             "This changes the answer, so one value is not a result. Low "
@@ -339,3 +343,17 @@ class TsnePanel(QWidget):
             else:
                 widget.setCurrentText(value)
             widget.blockSignals(False)
+
+        # The preset combo must describe what iterations/early_iterations
+        # actually hold, not whatever it last showed -- loaded values that
+        # happen to match a named preset should show that name, and anything
+        # else must say "Custom" rather than silently mislabel a suggested
+        # (data-scaled) iteration count as "Standard".
+        matched = CUSTOM
+        for name, iterations, early in TSNE_PRESETS:
+            if (iterations, early) == (int(params.n_iter), int(params.early_exaggeration_iter)):
+                matched = name
+                break
+        self.preset_box.blockSignals(True)
+        self.preset_box.setCurrentText(matched)
+        self.preset_box.blockSignals(False)

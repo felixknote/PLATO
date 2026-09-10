@@ -399,6 +399,20 @@ class MainWindow(QMainWindow):
         keys.triggered.connect(self.show_shortcuts)
         help_menu.addAction(keys)
 
+        help_menu.addSeparator()
+        clear_projections = QAction("Clear cached projections…", self)
+        clear_projections.setStatusTip(
+            "Delete every cached t-SNE/UMAP layout, so the Embedding "
+            "Explorer recomputes them from scratch."
+        )
+        # self.explorer does not exist yet at menu-build time (it is created
+        # after _build_menu runs -- see __init__), so it has to be looked up
+        # when the action actually fires, not bound to right now.
+        clear_projections.triggered.connect(
+            lambda: self.explorer.clear_projection_cache() if self.explorer else None
+        )
+        help_menu.addAction(clear_projections)
+
         # Actions that only mean something on the browser tab, greyed out
         # elsewhere rather than silently doing nothing.
         self._browser_actions = [

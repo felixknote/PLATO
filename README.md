@@ -295,14 +295,36 @@ Z:\Analysis\DINO\<dataset>    features_all.npz          embeddings: (N, D) float
     metadata.json             optional; model name, crop size
 ```
 
-**Projections.** UMAP and t-SNE. Parameters are preset from the dataset when
-one loads, rather than fixed: `n_neighbors` scales with the point count
-(clamped to 15-500, so it lands on the lab's tuned 500 for a 30k-row DINO
-export and on something sane for a few hundred computed descriptors), and
-subsampling only engages above ~40k points. Geometry follows what the vectors
-are, not a preference — learned embeddings get an L2 normalise, PCA to 50
-dimensions and a cosine metric; hand-computed descriptors are already
-standardised per feature and stay Euclidean with no PCA. Every value is editable.
+**Projections.** t-SNE is the default method; UMAP is also available. Both are
+seeded from `plato.data.projection.suggest`, which is tuned for *this lab's
+actual data* (DINO features, cosine geometry, 5k-50k points, 50-186 real
+conditions) rather than from general-purpose defaults:
+
+* **t-SNE perplexity is a flat 4**, not scaled with dataset size. That
+  contradicts the general t-SNE literature (which suggests perplexity in the
+  hundreds at tens of thousands of points) on purpose: a silhouette-score
+  sweep against a real 32,256-point DINO export, scored against 54
+  ground-truth perturbations (dose/guide collapsed), found perplexity 3-5
+  clearly best — at both a 5,000-point subsample and the full dataset. The
+  likely reason is that these are *frozen* DINO features with no fine-tuning
+  on this task, so a small neighbourhood finds whatever local structure
+  exists without a large one averaging it away. Re-measure if a
+  fine-tuned embedding ever replaces these features — this is a property of
+  the embedding, not a law about t-SNE. t-SNE's iteration count and
+  early-exaggeration length scale with n instead (750-1500 / 250-500), since
+  a flat 500 total iterations under-converges the larger exports.
+* **UMAP `n_neighbors`** scales as `0.4*sqrt(n)`, clamped to [15, 100] — the
+  same sweep found n_neighbors=30 a genuine interior peak (every value tried
+  from 5 to 200 scored worse), and the sublinear formula is calibrated to
+  land there at the scale it was measured at while still growing for larger
+  datasets. `min_dist` is 0.1 for learned embeddings.
+
+Subsampling only engages above ~40k points. Geometry follows what the
+vectors are, not a preference — learned embeddings get an L2 normalise, PCA
+to 50 dimensions and a cosine metric; hand-computed descriptors are already
+standardised per feature and stay Euclidean with no PCA. Every value is
+editable, and **Help → Clear cached projections…** empties the on-disk cache
+if a code or data change makes old layouts suspect.
 
 UMAP runs multithreaded by default. It refuses to use more than one core once
 its seed is fixed -- the parallel optimiser is not order-deterministic -- so
@@ -319,10 +341,27 @@ a genuinely new projection instead of serving a stale one. Long runs happen on
 a worker thread; the window stays live.
 
 **Colouring.** Gene, guide, antibiotic, concentration, MoA, pathway, control
-vs treatment, experiment arm, plate, well, or the raw condition. Categorical
-fields get a fixed palette assigned in sorted order, so a value keeps its
-colour between sessions and across both arms. A dose series is detected as
-numeric and gets a continuous ramp instead.
+vs treatment, experiment arm, plate, well, dataset (when embeddings are
+combined into a joint projection), or the raw condition. A category's colour
+is assigned from the full dataset column, not from whatever is currently
+visible, so filtering or faceting never reassigns another category's colour
+underneath it. A dose series is detected as numeric and gets a continuous
+ramp instead.
+
+Several categorical palettes are available (**Palette**, next to **Colour
+by**), including a "Deep" scale for light/white backgrounds — most of the
+app's default palette falls below readable contrast on white, so switching
+**Background** to Light/white (or a theme-following background while the
+app theme is light) suggests "Deep" automatically, unless a palette has been
+chosen by hand. Overlapping colour groups are drawn in a shuffled, chunked
+order rather than one solid colour fully on top of another, so which
+category *looks* like it dominates a mixed region is not just an artefact of
+alphabetical sort order.
+
+**Display by** facets the plot into one panel per value of a field, with a
+shared legend above the grid when colour and facet encode different things
+(a facet split on the same field the colour is already showing does not
+repeat a legend that would just restate the panel titles).
 
 **Hover and click.** Hovering previews the original micrograph with its
 metadata; clicking opens it in the same full-resolution viewer the browser
@@ -331,9 +370,12 @@ files through the metadata columns, never through row position — the export's
 row order is an artefact of the extractor's directory walk. Set
 `PLATO_IMAGE_ROOT` if your images are not where a loaded plate points.
 
-**Export.** PNG and SVG, both from the live scene, so the file carries
-whatever is on screen: method, colouring, filters, zoom and legend. The SVG is
-real vector geometry, not a raster in a wrapper.
+**Export.** PNG and SVG, from whichever view is actually on screen — the
+single plot or the faceted grid, legend included either way. The single-plot
+export is the live pyqtgraph scene, so its SVG is real vector geometry; the
+grid is composed from its own laid-out widgets at their genuine on-screen
+size, so a wide window exports wide rather than at some unrelated preferred
+size.
 
 ### MoA and pathway annotation
 
@@ -393,8 +435,11 @@ views/                the two analysis arms, as plain QWidgets
   compare_view.py       the N-way comparison
   explorer.py           the embedding explorer tab
   scatter.py            pyqtgraph scatter: hover, click, PNG/SVG export
+  grid_view.py           facet grid: shared legend, page export, shared axes
+  tsne_panel.py          t-SNE own parameters, presets, and misread caveats
   preview.py            hover preview, loaded off-thread
-  palette.py            stable categorical colours, continuous dose ramps
+  palette.py            value -> colour assignment (stable across filters)
+  palettes.py            the palette registry: every named scale, by kind
 gui/                  the shell and everything Qt-only
   main_window.py        menu, shortcuts, and the two tabs
   viewer.py             pyqtgraph full-resolution window (both arms open it)

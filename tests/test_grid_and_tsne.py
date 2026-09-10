@@ -290,5 +290,9 @@ def test_tsne_parameters_key_the_cache_but_do_not_disturb_umap():
 def test_presets_are_ordered_by_cost():
     iterations = [n for _name, n, _early in TSNE_PRESETS]
     assert iterations == sorted(iterations)
-    assert tsne_preset("Standard") == (500, 250)
+    # Raised from 500 to 750: 500 total iterations is openTSNE's documented
+    # convergence FLOOR, not a target, and this project's datasets (5k-48k
+    # points) sit above the size where that floor is enough -- see
+    # suggest()'s n_iter formula, which starts at 750 for the same reason.
+    assert tsne_preset("Standard") == (750, 250)
     assert tsne_preset("nonsense") is None

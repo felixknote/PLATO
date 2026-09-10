@@ -74,6 +74,19 @@ _BRIGHT = (
     "#a8e05f", "#ff9d6e", "#7ae0f0", "#f5a3d8", "#e0d24a",
 )
 
+# Deep-toned set for light/white backgrounds. _PLATO's mid-saturation hues
+# are tuned for a dark ground (see palette.py's own docstring) and read
+# washed out on white -- 17 of its 20 colours fall below WCAG's 3:1 minimum
+# contrast for graphical objects against white. Same hue order and count as
+# _PLATO so switching between them for a background change keeps each value
+# in the same relative position, just darkened.
+_DEEP = (
+    "#1f6fb2", "#c9700a", "#1f8f6f", "#c23a58", "#6b4a9e",
+    "#4d7a1f", "#b1461f", "#1a7d8f", "#a24f8a", "#8a7a1f",
+    "#3f5fa8", "#a1462a", "#217a56", "#93447a", "#5a7a1f",
+    "#2c7a91", "#a5701f", "#4c5cab", "#6f8a1f", "#b1504f",
+)
+
 # -- sequential --------------------------------------------------------------
 
 # The app's own ramp: dark blue -> cyan -> amber, monotonic in lightness.
@@ -124,6 +137,9 @@ PALETTES: tuple[Palette, ...] = (
             "Familiar ten-colour scale. Not colour-blind safe."),
     Palette("bright", "Bright (for dark backgrounds)", CATEGORICAL, _BRIGHT,
             "Higher saturation, for plots on a dark ground."),
+    Palette("deep", "Deep (for light backgrounds)", CATEGORICAL, _DEEP,
+            "Darker, more saturated version of PLATO's scale -- legible on "
+            "white where the default washes out."),
 
     Palette("plato_seq", "PLATO ramp", SEQUENTIAL, _PLATO_SEQ,
             "Blue to amber, monotonic in lightness."),
@@ -158,6 +174,21 @@ def get(key: str) -> Palette:
 
 def of_kind(kind: str) -> list[Palette]:
     return [p for p in PALETTES if p.kind == kind]
+
+
+def categorical_for_background(mode: str | None, *, theme_is_dark: bool = True) -> Palette:
+    """The categorical palette that reads well on ``mode``'s ground.
+
+    Mirrors the light/dark resolution scatter.py's own set_background and
+    _set_legend already use for axis ink and the legend panel: "light" is
+    always light; "theme" (follow the app theme) is light exactly when the
+    app theme itself is light; "transparent" has no ground of its own to key
+    off, so it follows the app theme too, since a transparent plot is
+    composited over the app most of the time it is actually being looked at.
+    "dark" is the one explicit case that is never light.
+    """
+    is_light = mode == "light" or (mode in (None, "theme", "transparent") and not theme_is_dark)
+    return get("deep") if is_light else get(DEFAULTS[CATEGORICAL])
 
 
 def default_for(kind: str) -> Palette:

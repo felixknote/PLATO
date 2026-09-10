@@ -165,19 +165,80 @@ class ProjectionParams:
 def suggest(n_points: int, *, learned: bool = True) -> ProjectionParams:
     """Sensible starting parameters for a dataset of this size and kind.
 
-    There is no single right default. ``n_neighbors=500`` is the tuned value
-    for tens of thousands of DINO vectors, where neighbourhoods are large and
-    the question is global structure; applied to a few hundred points it
-    exceeds the sample and every point becomes a neighbour of every other,
-    which erases exactly the local structure a projection exists to show.
+    There is no single right default. These formulas are tuned for THIS
+    project's actual data: DINO features (1024-d, cosine geometry) over
+    E. coli perturbation screens where the true structure is on the order of
+    50-100 conditions (tens of CRISPRi genes x guides, tens of antibiotics x
+    doses) in datasets of roughly 5k-50k images. That "many conditions in a
+    large N" regime is exactly where a linear-in-N neighbourhood size goes
+    wrong: it was previously scaled at 1.5% of the points, uncapped in
+    practice below its 500 ceiling, which by ~30k points puts each point's
+    neighbourhood at several times the size of a single condition (a
+    condition here is roughly N / 100 points) -- UMAP and t-SNE alike then
+    average distinct phenotypes together before the projection ever sees
+    them, which reads on screen as "these conditions collapsed" when the
+    actual cause is a parameter, not the biology.
 
-    So the defaults scale:
+    So the defaults instead:
 
-    * **n_neighbors** ~ 1.5% of the points, clamped to [15, 500]. That lands
-      on the tuned 500 for the 30k-row exports and on something sane for a
-      few hundred computed descriptors.
-    * **perplexity** ~ n/100, clamped to [10, 50]; openTSNE additionally
-      requires it below n/3, which the runner enforces.
+    * **UMAP n_neighbors** ~ 0.4*sqrt(n), clamped to [15, 100]. Sublinear
+      instead of linear, and capped well below N/100-ish points-per-condition
+      rather than at 500 -- umap-learn's own documented range is 2-200, and
+      100-200 is already described as favouring broad topology over local
+      structure. Confirmed empirically: a silhouette-score sweep of
+      n_neighbors in {5, 8, 10, 12, 15, 30, 50, 75, 100, 150, 200} against
+      the real 32,256-point "Aug26 CRISPRi & ABx" DINO export (54
+      ground-truth perturbations, dose/guide collapsed) found n_neighbors=30
+      a genuine interior peak -- every value on both sides scored worse,
+      including the smaller ones, so this is not merely "smaller is better"
+      down to some floor. 0.4*sqrt(n) is calibrated to land on 30 at the
+      5,000-point scale the sweep was run at (subsampled from the 32k
+      export for tractable runtime) while still growing sublinearly for
+      larger datasets, since the mechanism that made linear scaling wrong
+      (neighbourhood outgrowing a single condition) does not stop existing
+      just because 30 was measured at one particular n. (Was 1.5% of n,
+      clamped to [15, 500]: linear growth meant two exports of the same
+      experiment at 33k and 48k rows got the identical clamped value of 500,
+      which is both too large and a parameter coincidence, not a considered
+      choice.)
+    * **UMAP min_dist** 0.1 for learned embeddings, not 1.0. 1.0 is close to
+      umap-learn's ceiling and is documented as favouring a smooth, spread
+      figure over resolving clusters -- exactly wrong for finding which of
+      50-100 conditions are and are not distinct, which is the actual
+      question here. (The AI4AB analysis script this recipe was copied from
+      optimises for a presentation figure, not for this app's job.)
+    * **t-SNE perplexity** = 4, flat, not scaled with n. This overrides the
+      general literature guidance (Kobak & Berens 2019 and openTSNE's own
+      docs suggest perplexity in the hundreds for tens of thousands of
+      points) with a direct measurement on this project's actual embedding
+      space: a silhouette-score sweep against the real 32,256-point "Aug26
+      CRISPRi & ABx" DINO export (54 ground-truth perturbations,
+      dose/guide collapsed) at FULL scale -- not subsampled -- tested
+      perplexity in {3, 5, 7, 10, 15, 20} and found 3 and 5 tied for best
+      (-0.2107 / -0.2110), both clearly ahead of 7 (-0.2275) and everything
+      above. The same low-perplexity result held at a 5,000-point subsample
+      first (optimum 4-5 there too), which argued for testing at full scale
+      in case it was a density-per-cluster artefact of subsampling -- it
+      was not; the result is stable across a 6x change in dataset size.
+      The likely explanation is that these are FROZEN DINO features with no
+      fine-tuning on this data, so there is no training signal that made
+      the 54 perturbations linearly separable in the embedding at all
+      (every score in the sweep was negative); a low perplexity finds
+      whatever local structure exists without a large neighbourhood
+      averaging it away first. If a future embedding is fine-tuned on this
+      task and separates conditions more cleanly, this flat default should
+      be re-measured rather than assumed to still hold -- it is a property
+      of THIS embedding space, not a law about t-SNE.
+    * **t-SNE iterations** scale with n instead of a flat 500 main / 250
+      early-exaggeration: ``n_iter`` from n/25 clamped to [750, 1500],
+      ``early_exaggeration_iter`` from n/50 clamped to [250, 500]. 500 total
+      iterations is a documented floor for convergence, not a target
+      (Belkina et al., 2019 measured under-converged defaults costing over
+      30 points of 1-NN accuracy versus a properly converged run); a fixed
+      count that never grows with the dataset increasingly under-converges
+      as n rises, which looks identical on screen to genuine cluster
+      collapse -- the one confound most worth ruling out before reading
+      "these conditions look the same" as a biological conclusion.
     * **subsample** kicks in only above ~40k points, where a full UMAP starts
       costing more minutes than the first look is worth.
     * **PCA** is skipped for low-dimensional inputs -- reducing 31 image
@@ -187,15 +248,23 @@ def suggest(n_points: int, *, learned: bool = True) -> ProjectionParams:
     geometry, worth normalising) or hand-computed descriptors, which are
     already standardised per feature and live in a Euclidean space.
     """
+    import math
+
     n_points = max(1, int(n_points))
 
-    neighbours = int(round(n_points * 0.015))
-    neighbours = max(15, min(500, neighbours))
+    neighbours = int(round(0.4 * math.sqrt(n_points)))
+    neighbours = max(15, min(100, neighbours))
     # Never at or above the sample size: UMAP clamps it anyway, but a value
     # that has to be clamped is not a sensible default to show the user.
     neighbours = min(neighbours, max(2, n_points - 1))
 
-    perplexity = float(max(10, min(50, n_points // 100)))
+    # Flat 4, empirically measured (see docstring) -- not scaled with n. Must
+    # still respect openTSNE's perplexity < n/3 for a genuinely tiny dataset,
+    # which the runner enforces at use time regardless, but a SUGGESTED value
+    # that already needs clamping the moment it is shown is not sensible.
+    perplexity = min(4.0, max(2.0, (n_points - 1) / 3.0))
+    n_iter = max(750, min(1500, round(n_points / 25)))
+    early_exaggeration_iter = max(250, min(500, round(n_points / 50)))
 
     max_points = None if n_points <= 40_000 else 20_000
 
@@ -205,10 +274,10 @@ def suggest(n_points: int, *, learned: bool = True) -> ProjectionParams:
         pca_components=DEFAULT_PCA_COMPONENTS if learned else 0,
         metric="cosine" if learned else "euclidean",
         n_neighbors=neighbours,
-        min_dist=1.0 if learned else 0.1,
+        min_dist=0.1,
         perplexity=perplexity,
-        n_iter=500,
-        early_exaggeration_iter=250,
+        n_iter=n_iter,
+        early_exaggeration_iter=early_exaggeration_iter,
         early_exaggeration=12.0,
         late_exaggeration=0.0,
         learning_rate=0.0,
@@ -223,10 +292,17 @@ def suggest(n_points: int, *, learned: bool = True) -> ProjectionParams:
 # the right count depends on the dataset -- but the ordering is the point:
 # a fast look is not a converged layout, and saying so beats a single default
 # that is quietly one or the other.
+#
+# "Standard" raised from 500/250 to 750/250: 500 total iterations is
+# openTSNE's documented convergence FLOOR, not a target, and this project's
+# datasets (5k-48k points) sit above the size where that floor is enough --
+# see suggest()'s n_iter formula, which starts at 750 for the same reason.
+# Keeping "Standard" at the old value would mean the preset ladder's own
+# middle rung under-converges the moment n_points scales past a few thousand.
 TSNE_PRESETS: tuple[tuple[str, int, int], ...] = (
     ("Fast exploration", 250, 125),
-    ("Standard", 500, 250),
-    ("High quality", 1500, 350),
+    ("Standard", 750, 250),
+    ("High quality", 1500, 400),
     ("Very high quality", 3000, 500),
 )
 
@@ -489,6 +565,31 @@ class ProjectionCache:
             except (OSError, json.JSONDecodeError):
                 continue
         return out
+
+    def clear(self) -> int:
+        """Delete every cached projection. Returns how many were removed.
+
+        Counted in pairs (.npz + .json), not files, so the number reported
+        means "projections" to whoever reads it rather than "files on disk".
+        A missing counterpart (an interrupted save) is still removed -- this
+        is a cleanup operation, not a consistency check.
+        """
+        if not self.directory.is_dir():
+            return 0
+        removed = 0
+        for meta_path in self.directory.glob("*.json"):
+            array_path = meta_path.with_suffix(".npz")
+            if array_path.exists():
+                array_path.unlink()
+            meta_path.unlink()
+            removed += 1
+        # Any .npz left without a .json (a save interrupted after the array
+        # write) counts too, since it is still disk space this is meant to
+        # reclaim, and would otherwise linger forever.
+        for array_path in self.directory.glob("*.npz"):
+            array_path.unlink()
+            removed += 1
+        return removed
 
 
 def project(

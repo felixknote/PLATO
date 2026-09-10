@@ -45,9 +45,13 @@ structural problem: the sidebar is now a long scroll of unrelated sections.
 Wants collapsible sections, or tabs (Data / Embedding / Encoding / Analysis),
 rather than more scrolling. Also worth revisiting:
 * which controls deserve to be visible at all times vs. behind a disclosure;
-* the Projection / t-SNE settings split, which currently duplicates
-  perplexity in two places depending on the method;
 * whether Display should be split into encoding vs. layout.
+
+(The Projection / t-SNE settings split that used to duplicate perplexity in
+two places -- a standalone box shown only for UMAP, where it was never read,
+alongside the t-SNE panel's own control -- is fixed: the standalone box is
+gone, and the t-SNE panel is now the sole authority on perplexity, seeded
+from the dataset via `apply_suggested_params` -> `TsnePanel.load_from`.)
 
 ## 3D projections
 
@@ -58,14 +62,20 @@ the view: pyqtgraph's `GLViewWidget` is a separate OpenGL stack with no
 selection would need reimplementing rather than extending. 2-D remains the
 default either way.
 
-## Joint projection across embeddings
+## Re-validate the empirical UMAP/t-SNE defaults if the embedding changes
 
-The workspace holds several embeddings, but the grid facets one at a time.
-"Display by dataset" across *open* embeddings needs their coordinate systems
-reconciled -- two independent UMAPs are not comparable point for point.
-`Workspace.combined_frame()` exists for the aggregate questions; the honest
-version needs a projection fitted over the union, which is a design decision
-rather than a wiring job.
+`plato/data/projection.py`'s `suggest()` sets t-SNE perplexity to a flat 4
+and UMAP `n_neighbors` to `0.4*sqrt(n)` (peaking at 30 around 5k points) not
+from general literature guidance but from a direct silhouette-score sweep
+against the real `Aug26 CRISPRi & ABx` DINO export, scored against 54
+ground-truth perturbations. Both results are specific to *frozen, untuned*
+DINO features -- the low optimum plausibly comes from there being no
+training signal that made these particular conditions separable in the
+embedding space at all. If a future embedding is fine-tuned on this task (or
+a fundamentally different feature extractor is used), these defaults should
+be re-measured rather than assumed to still hold. The methodology (subsample
+sweep, then confirm at full scale) is worth reusing; see `suggest()`'s
+docstring for the exact numbers found at each grid point.
 
 ## Smaller items
 
@@ -76,3 +86,14 @@ rather than a wiring job.
 * Light theme has not been checked widget by widget; the mechanism works and
   most labels now take their colour from the global stylesheet, but anything
   still baking colours at import will stay dark until rebuilt.
+
+## Done, kept for context
+
+* **Joint projection across embeddings.** `plato/data/joint_projection.py`
+  concatenates several open embeddings' vectors and fits ONE projection over
+  the union (`make_joint_entry`), so position is genuinely comparable across
+  datasets rather than two independent UMAPs that happen to share a plot.
+  Verified against real data: combining `Jul26 ABx` + `Jul26CRISPRi`
+  (48,384 points) produced correct frame length, correct "Colour by Dataset"
+  legend, and a t-SNE fit completing in ~16s. Reached via **Combine
+  embeddings…**.
