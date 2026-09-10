@@ -186,9 +186,12 @@ def build_frame(
         frame[column] = (
             source[column].astype(str).str.strip() if column in source.columns else ""
         )
-    # Some exports name the arm differently, or not at all.
-    if frame[EXPERIMENT].eq("").all():
-        for candidate in ("source", "arm", "screen"):
+    # Some exports name the arm differently, or not at all. Tried as a
+    # fallback BEFORE parsing, because it may be the only signal available on
+    # a file with neither a real experiment column nor parseable conditions.
+    had_explicit_experiment = frame[EXPERIMENT].ne("").any()
+    if not had_explicit_experiment:
+        for candidate in ("arm", "screen", "source"):
             if candidate in source.columns:
                 frame[EXPERIMENT] = source[candidate].astype(str).str.strip()
                 break
@@ -206,6 +209,35 @@ def build_frame(
     frame[ROLE] = [c.role for c in parsed]
     frame[CONTROL_KIND] = [c.control_kind for c in parsed]
     frame[PERTURBATION] = [c.perturbation for c in parsed]
+
+    # Whether each row is a genetic (CRISPRi) or chemical (antibiotic)
+    # perturbation is exactly what "which arm" means, and it is now known
+    # precisely from parsing -- more reliably than guessing from whichever
+    # column happens to be named "source"/"arm"/"screen", which on
+    # Dec25Apr26 CRISPRi & ABx is a three-way split (control/drug/mutant)
+    # that does NOT line up with the two-way CRISPRi/ABx arm split: its
+    # "control" bucket holds BOTH CRISPRi roles (non-targeting AND induced
+    # gene), so colouring by that "arm" mixed a CRISPRi sub-role into what
+    # looked like a clean two-way comparison. Only used when there was no
+    # explicit experiment column to begin with, so a real one (Aug26 CRISPRi
+    # & ABx already has "ABx"/"CRISPRi" directly) is never overridden by a
+    # guess.
+    if not had_explicit_experiment:
+        has_gene = pd.Series([bool(c.gene) for c in parsed])
+        has_drug = pd.Series([bool(c.drug) for c in parsed])
+        if (has_gene | has_drug).any():
+            derived = pd.Series([""] * len(parsed), dtype=object)
+            derived[has_gene] = "CRISPRi"
+            derived[~has_gene & has_drug] = "ABx"
+            # Keep the raw fallback wherever parsing found neither -- an
+            # unparsed label is still worth grouping by its own column value
+            # rather than being blanked out.
+            still_unknown = ~has_gene & ~has_drug
+            if still_unknown.any():
+                derived[still_unknown.to_numpy()] = frame[EXPERIMENT][
+                    still_unknown.to_numpy()
+                ]
+            frame[EXPERIMENT] = derived.to_numpy()
 
     # MoA annotates drugs; pathway annotates gene targets. Both are external
     # tables -- absent one, the column is present but entirely unannotated,

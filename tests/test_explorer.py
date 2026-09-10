@@ -135,6 +135,32 @@ def test_parse_condition_handles_blank_and_unknown():
     assert odd.perturbation == "some new thing"
 
 
+# Dec25Apr26 CRISPRi & ABx's own naming convention: underscores throughout,
+# with an explicit ATC induction state instead of a bare replicate number.
+# Before this was recognised, every one of these 28 real labels fell through
+# to parse_condition's last resort and came back as a DRUG -- so a CRISPRi
+# gene knockdown was coloured, filtered and grouped as if it were an
+# antibiotic.
+@pytest.mark.parametrize(
+    "label,gene,guide,role,has_control_kind",
+    [
+        ("ACE-1_NC_1_minusATC", "ACE-1", "NC_1_minusATC", "control", True),
+        ("ACE-1_NC_6_plusATC", "ACE-1", "NC_6_plusATC", "control", True),
+        ("ACE-1_minusATC", "ACE-1", "minusATC", "treatment", False),
+        ("ACE-1_plusATC", "ACE-1", "plusATC", "treatment", False),
+        ("MG1655_NC_1_minusATC", "MG1655", "NC_1_minusATC", "control", True),
+        ("MG1655_plusATC", "MG1655", "plusATC", "treatment", False),
+    ],
+)
+def test_parse_condition_atc_induction_suffix(label, gene, guide, role, has_control_kind):
+    parsed = parse_condition(label)
+    assert parsed.gene == gene
+    assert parsed.guide == guide
+    assert parsed.drug == "", "an ATC-suffixed CRISPRi label must never become a drug"
+    assert parsed.role == role
+    assert bool(parsed.control_kind) == has_control_kind
+
+
 # -- annotation tables ------------------------------------------------------
 
 
@@ -232,6 +258,79 @@ def test_build_frame_resolves_fields(dataset_dir):
     assert "gene" in colour_fields(frame)
     assert "drug" in filter_fields(frame)
     assert distinct_values(frame, "concentration") == ["1x", "2x"]
+
+
+# Dec25Apr26 CRISPRi & ABx has no dedicated experiment column: only a
+# "source" column with THREE values (control/drug/mutant) that do not line
+# up with the CRISPRi/ABx arm split -- "control" holds BOTH CRISPRi's
+# non-targeting rows AND its induced-gene treatment rows. Falling back to
+# that column directly, as the arm, mixed a CRISPRi sub-role into what
+# looked like a clean two-way comparison.
+def _write_mixed_arm_dataset(directory, *, n=120, dim=16):
+    directory.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(0)
+    # Half CRISPRi-shaped labels (mix of NC control and treatment guides),
+    # half ABx-shaped labels -- no "experiment"/"arm"/"screen" column, only
+    # "source", exactly like the real export.
+    rows = []
+    for i in range(n):
+        if i % 2 == 0:
+            is_control = i % 4 == 0
+            label = "ACE-1_NC_1_minusATC" if is_control else "ftsZ_1"
+            source = "control" if is_control else "mutant"
+        else:
+            label = "Ciprofloxacin 1x"
+            source = "drug"
+        rows.append(
+            {
+                "source": source,
+                "plate": "P1",
+                "well": f"A{i % 12 + 1:02d}",
+                "label": label,
+                "image_name": f"img_{i:04d}",
+            }
+        )
+    pd.DataFrame(rows).to_csv(directory / "features_metadata.csv", index=False)
+    vectors = rng.normal(size=(n, dim)).astype(np.float32)
+    np.savez(
+        directory / "features_all.npz",
+        embeddings=vectors,
+        label_indices=np.arange(n, dtype=np.int32),
+    )
+    return directory
+
+
+def test_experiment_arm_is_derived_from_gene_vs_drug_not_a_raw_source_column(tmp_path):
+    directory = _write_mixed_arm_dataset(tmp_path / "mixed")
+    dataset = load_dataset(directory)
+    frame, _ = build_frame(dataset)
+
+    # The real bug: "source" has three values that do not match the arm.
+    assert set(dataset.frame["source"]) == {"control", "drug", "mutant"}
+
+    # The derived experiment column must be a clean two-way CRISPRi/ABx
+    # split, matching which rows actually parsed to a gene vs a drug.
+    assert set(frame["experiment"]) == {"CRISPRi", "ABx"}
+    assert (frame.loc[frame["gene"] != "", "experiment"] == "CRISPRi").all()
+    assert (frame.loc[frame["drug"] != "", "experiment"] == "ABx").all()
+
+    # And the CRISPRi control (NC) rows must NOT have been folded into a
+    # separate arm just because they shared "source=control" with nothing --
+    # they are CRISPRi like the rest of that gene's rows.
+    nc_rows = frame[frame["control_kind"] != ""]
+    assert not nc_rows.empty
+    assert (nc_rows["experiment"] == "CRISPRi").all()
+
+
+def test_explicit_experiment_column_is_never_overridden_by_derivation(dataset_dir):
+    """Aug26 CRISPRi & ABx has "ABx"/"CRISPRi" directly; a real column must
+    win over anything derived from parsing."""
+    dataset = load_dataset(dataset_dir)
+    frame, _ = build_frame(dataset)
+    # dataset_dir's fixture writes a real "experiment" column (ABx_P1/
+    # CRISPRi_P1 plate names split on "_"); confirm it was kept verbatim
+    # rather than replaced by a gene/drug-derived guess.
+    assert set(frame["experiment"]) == {"ABx", "CRISPRi"}
 
 
 def test_image_resolver_finds_files_in_a_plate_layout(tmp_path):

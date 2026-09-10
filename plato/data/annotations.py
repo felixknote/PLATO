@@ -37,6 +37,23 @@ UNANNOTATED = "unannotated"
 # convention plato.toml already uses for this screen.
 GENE_GUIDE_RE = re.compile(r"^(?P<gene>.+)_(?P<guide>\d+)$")
 
+# A second CRISPRi naming convention, seen on Dec25Apr26 CRISPRi & ABx:
+# "<gene>[_NC[_<replicate>]]_{plus,minus}ATC", e.g. "ACE-1_NC_1_minusATC",
+# "MG1655_plusATC", "rpsA_NC_3_plusATC" -- underscores throughout rather than
+# the space before "NC" that GENE_GUIDE_RE's exports use, and an explicit
+# induction state (whether the CRISPRi system was induced with anhydrotetra-
+# cycline) rather than a bare replicate number.
+#
+# Tried BEFORE GENE_GUIDE_RE's fallthrough matters here: without this,
+# "ACE-1_NC_1_minusATC" matched neither existing pattern and fell all the way
+# to parse_condition's last resort, which treats an unmatched label as a
+# DRUG -- so every one of these 28 real labels was being coloured, filtered
+# and grouped as if it were an antibiotic, not a CRISPRi condition.
+ATC_INDUCTION_RE = re.compile(
+    r"^(?P<gene>[A-Za-z0-9-]+?)(?:_(?P<nc>NC)(?:_(?P<replicate>\d+))?)?"
+    r"_(?P<state>plus|minus)ATC$"
+)
+
 # ABx condition: "<drug> <dose>x", e.g. "Ciprofloxacin 1x", "Penicillin G 0.25x".
 # The drug group is greedy up to the final dose token, so two-word drug names
 # ("Penicillin G", "Polymyxin B") stay whole.
@@ -115,6 +132,31 @@ def parse_condition(label: object) -> Condition:
             drug=text,
             role=CONTROL,
             control_kind=CONTROL_LABELS[folded],
+        )
+
+    match = ATC_INDUCTION_RE.match(text)
+    if match:
+        gene = _clean(match.group("gene"))
+        is_nc = match.group("nc") is not None
+        replicate = match.group("replicate")
+        state = match.group("state")
+        # CONTROL_GENES is keyed on "<gene> nc" (a space, from the export
+        # that dict was built against); this convention never writes that
+        # combined form, so a non-targeting guide here is recognised by the
+        # NC marker THIS regex captured, not by a dictionary lookup.
+        kind = f"{gene} (non-targeting)" if is_nc else ""
+        # Guide records everything that distinguishes this row from another
+        # row of the same gene: whether it is the non-targeting control,
+        # which replicate, and the induction state -- e.g. "NC_1_plusATC" or
+        # just "plusATC" for a bare gene with no replicate.
+        guide_bits = [part for part in ("NC" if is_nc else None, replicate) if part]
+        guide_bits.append(f"{state}ATC")
+        return Condition(
+            label=text,
+            gene=gene,
+            guide="_".join(guide_bits),
+            role=CONTROL if is_nc else TREATMENT,
+            control_kind=kind,
         )
 
     match = GENE_GUIDE_RE.match(text)
