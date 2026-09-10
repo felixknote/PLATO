@@ -64,6 +64,25 @@ MIN_LASSO_POINTS = 4
 SELECTION_COLOUR = "#e8a33d"
 SELECTION_RING_PX = 13
 
+# Plot background options. Deliberately independent of the application theme:
+# a dark interface with a white plot is exactly what you want when the plot is
+# destined for a figure, and TRANSPARENT is what you want when the figure has
+# its own ground.
+BACKGROUND_THEME = "theme"
+BACKGROUND_DARK = "dark"
+BACKGROUND_LIGHT = "light"
+BACKGROUND_TRANSPARENT = "transparent"
+BACKGROUND_CHOICES = (
+    (BACKGROUND_THEME, "Follow app theme"),
+    (BACKGROUND_DARK, "Dark"),
+    (BACKGROUND_LIGHT, "Light / white"),
+    (BACKGROUND_TRANSPARENT, "Transparent"),
+)
+
+# What "greyed out" means: the unselected points keep their position but lose
+# their colour, so the selection is the only thing carrying hue.
+GREY_OUT_COLOUR = "#4a5058"
+
 
 def _density_lookup_table() -> np.ndarray:
     """Background -> blue -> cyan -> amber, as a 256-entry RGB table.
@@ -181,6 +200,14 @@ class EmbeddingScatter(QWidget):
         self._selection.hide()
         self.selected_rows = np.empty(0, dtype=np.int64)
 
+        # -- background
+        self.background_mode = BACKGROUND_THEME
+        # Fixed axis extent, when faceting wants every panel comparable.
+        self._view_limits: tuple[float, float, float, float] | None = None
+        # Draw unselected points in grey so a selection stands out.
+        self.grey_out_unselected = False
+        self._colours: list[str] = []
+
         # -- density
         self.density_enabled = False
         self._density_image = pg.ImageItem()
@@ -202,6 +229,7 @@ class EmbeddingScatter(QWidget):
         groups: dict[str, np.ndarray] | None = None,
         point_size: int = 6,
         opacity: float = 0.85,
+        symbols: list[str] | None = None,
         legend_entries: list[tuple[str, str]] | None = None,
         reset_view: bool = True,
     ) -> None:
@@ -219,6 +247,21 @@ class EmbeddingScatter(QWidget):
         self._rows = np.ascontiguousarray(row_indices, dtype=np.int64)
         self._hovered = -1
         self._highlight.hide()
+        self._colours = list(colours)
+        self._point_size = point_size
+        self._opacity = opacity
+        self._symbols = list(symbols) if symbols else None
+
+        # Grey-out is applied to the colours before grouping, so the greyed
+        # points collapse into ONE draw call rather than staying spread across
+        # every original colour group.
+        if self.grey_out_unselected and len(self.selected_rows):
+            selected = np.isin(self._rows, self.selected_rows)
+            colours = [
+                colour if keep else GREY_OUT_COLOUR
+                for colour, keep in zip(colours, selected)
+            ]
+            groups = None
 
         if groups is None:
             groups = {}
@@ -233,7 +276,21 @@ class EmbeddingScatter(QWidget):
         )
         alpha = int(max(0.0, min(1.0, opacity)) * 255)
 
+        # Batches are (colour, symbol) pairs: pyqtgraph draws one item in a
+        # single call only while both are uniform, so a second encoding costs
+        # at most (colours x symbols) draws rather than one per point.
+        batches: list[tuple[str, str, np.ndarray]] = []
         for colour, mask in groups.items():
+            if len(mask) == 0:
+                continue
+            if symbols is None:
+                batches.append((colour, "o", np.asarray(mask)))
+                continue
+            marks = np.asarray([symbols[i] for i in mask])
+            for symbol in dict.fromkeys(marks.tolist()):
+                batches.append((colour, symbol, np.asarray(mask)[marks == symbol]))
+
+        for colour, symbol, mask in batches:
             if len(mask) == 0:
                 continue
             brush_colour = QColor(colour)
@@ -242,6 +299,7 @@ class EmbeddingScatter(QWidget):
                 x=self._coords[mask, 0],
                 y=self._coords[mask, 1],
                 size=point_size,
+                symbol=symbol,
                 brush=pg.mkBrush(brush_colour),
                 pen=outline,
                 # Hit-testing is done here, not by pyqtgraph: its own hover
@@ -265,7 +323,9 @@ class EmbeddingScatter(QWidget):
             self._render_density()
 
         self._set_legend(legend_entries)
-        if reset_view:
+        if self._view_limits is not None:
+            self._apply_view_limits()
+        elif reset_view:
             self.plot.getViewBox().autoRange(padding=0.05)
 
     def _clear_items(self) -> None:
@@ -387,8 +447,13 @@ class EmbeddingScatter(QWidget):
         keeps a lasso'd cluster intact while you filter within it.
         """
         rows = np.unique(np.asarray(rows, dtype=np.int64).ravel())
+        changed = not np.array_equal(rows, self.selected_rows)
         self.selected_rows = rows
         self._draw_selection()
+        # Grey-out is a function of the selection, so it has to be repainted
+        # whenever that changes -- immediately, as specified.
+        if self.grey_out_unselected and changed:
+            self._repaint_colours()
         if notify:
             self.points_selected.emit(self.selected_rows)
 
@@ -405,6 +470,89 @@ class EmbeddingScatter(QWidget):
         else:
             rows = np.append(self.selected_rows, row)
         self.set_selection(rows, notify=notify)
+
+    def set_background(self, mode: str | None) -> None:
+        """Choose the plot's ground, independently of the app theme.
+
+        TRANSPARENT is a real alpha-zero background, not white: the export
+        path passes the same colour to the exporter, so a PNG dropped into a
+        figure carries the figure's ground rather than a white rectangle.
+        """
+        from ..gui import themes
+
+        self.background_mode = mode or BACKGROUND_THEME
+        if self.background_mode == BACKGROUND_TRANSPARENT:
+            colour = QColor(0, 0, 0, 0)
+        elif self.background_mode == BACKGROUND_LIGHT:
+            colour = QColor("#ffffff")
+        elif self.background_mode == BACKGROUND_DARK:
+            colour = QColor(IMAGE_BACKGROUND)
+        else:
+            colour = QColor(themes.current().image_background)
+        self.plot.setBackground(colour)
+
+        # Axis and label ink has to invert on a light ground or it vanishes.
+        light = self.background_mode == BACKGROUND_LIGHT
+        ink = "#20242b" if light else themes.current().text_muted
+        for axis in ("bottom", "left"):
+            self.plot.getAxis(axis).setPen(pg.mkPen(ink))
+            self.plot.getAxis(axis).setTextPen(pg.mkPen(ink))
+
+    def background_colour(self) -> QColor:
+        """The colour an export should fill with, alpha included."""
+        from ..gui import themes
+
+        if self.background_mode == BACKGROUND_TRANSPARENT:
+            return QColor(0, 0, 0, 0)
+        if self.background_mode == BACKGROUND_LIGHT:
+            return QColor("#ffffff")
+        if self.background_mode == BACKGROUND_DARK:
+            return QColor(IMAGE_BACKGROUND)
+        return QColor(themes.current().image_background)
+
+    def set_view_limits(self, x_min, x_max, y_min, y_max) -> None:
+        """Pin the visible extent, so facets share one coordinate system."""
+        self._view_limits = (float(x_min), float(x_max), float(y_min), float(y_max))
+        self._apply_view_limits()
+
+    def clear_view_limits(self) -> None:
+        self._view_limits = None
+
+    def _apply_view_limits(self) -> None:
+        if self._view_limits is None:
+            return
+        x_min, x_max, y_min, y_max = self._view_limits
+        self.plot.getViewBox().setRange(
+            xRange=(x_min, x_max), yRange=(y_min, y_max), padding=0
+        )
+
+    def set_grey_out(self, enabled: bool) -> None:
+        """Draw everything except the selection in grey."""
+        enabled = bool(enabled)
+        if enabled == self.grey_out_unselected:
+            return
+        self.grey_out_unselected = enabled
+        self._repaint_colours()
+
+    def _repaint_colours(self) -> None:
+        """Redraw with the current colours, honouring grey-out.
+
+        Reuses the coordinates and row indices already held, so toggling
+        grey-out or changing a selection never recomputes a projection or
+        re-reads the frame.
+        """
+        if len(self._coords) == 0 or not self._colours:
+            return
+        self.set_points(
+            self._coords,
+            self._rows,
+            self._colours,
+            point_size=getattr(self, "_point_size", 6),
+            opacity=getattr(self, "_opacity", 0.85),
+            symbols=getattr(self, "_symbols", None),
+            legend_entries=None,
+            reset_view=False,
+        )
 
     def set_hover_marker(self, row: int) -> None:
         """Ring one row the way hovering it would, from outside the plot.
@@ -590,4 +738,8 @@ class EmbeddingScatter(QWidget):
             # Set width only, and let the exporter derive height from the
             # scene's aspect ratio; setting both distorts the plot.
             exporter.parameters()["width"] = width
+            # A transparent plot must export transparent. The exporter fills
+            # its canvas with this colour, so passing an alpha-zero QColor is
+            # what makes the PNG genuinely transparent rather than white.
+            exporter.parameters()["background"] = self.background_colour()
         exporter.export(path)

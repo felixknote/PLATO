@@ -111,7 +111,8 @@ def categorical_colours(values: list[str]) -> dict[str, str]:
         if is_unknown(value):
             mapping[value] = UNKNOWN_COLOUR
             continue
-        mapping[value] = CATEGORICAL[index % len(CATEGORICAL)]
+        scale = active_categorical()
+        mapping[value] = scale[index % len(scale)]
         index += 1
     return mapping
 
@@ -128,11 +129,12 @@ def _lerp(start: str, end: str, t: float) -> str:
 def continuous_colour(fraction: float) -> str:
     """Sample the ramp at ``fraction`` in [0, 1]."""
     fraction = max(0.0, min(1.0, fraction))
-    scaled = fraction * (len(CONTINUOUS) - 1)
+    scale = active_continuous()
+    scaled = fraction * (len(scale) - 1)
     low = int(scaled)
-    if low >= len(CONTINUOUS) - 1:
-        return CONTINUOUS[-1]
-    return _lerp(CONTINUOUS[low], CONTINUOUS[low + 1], scaled - low)
+    if low >= len(scale) - 1:
+        return scale[-1]
+    return _lerp(scale[low], scale[low + 1], scaled - low)
 
 
 def continuous_colours(values: list[str]) -> dict[str, str]:
@@ -147,6 +149,38 @@ def continuous_colours(values: list[str]) -> dict[str, str]:
     for value, number in numbers.items():
         mapping[value] = continuous_colour(0.5 if span <= 0 else (number - low) / span)
     return mapping
+
+
+def set_active_palette(key: str) -> None:
+    """Choose which registered palette this module assigns from.
+
+    Module-level rather than threaded through every call site: colour
+    assignment happens in several places (the scatter, the facets, the legend,
+    the cluster bars) and they must all agree, so the choice lives in one
+    place they all read. See plato.views.palettes for the registry.
+    """
+    global _ACTIVE_CATEGORICAL, _ACTIVE_CONTINUOUS
+    from . import palettes
+
+    palette = palettes.get(key)
+    if palette.kind == palettes.CATEGORICAL:
+        _ACTIVE_CATEGORICAL = palette.colours
+    else:
+        _ACTIVE_CONTINUOUS = palette.colours
+
+
+def active_categorical() -> tuple[str, ...]:
+    return _ACTIVE_CATEGORICAL
+
+
+def active_continuous() -> tuple[str, ...]:
+    return _ACTIVE_CONTINUOUS
+
+
+# The live scales. Start as the module's originals so behaviour is unchanged
+# until something calls set_active_palette.
+_ACTIVE_CATEGORICAL: tuple[str, ...] = CATEGORICAL
+_ACTIVE_CONTINUOUS: tuple[str, ...] = CONTINUOUS
 
 
 def ramp_over_array(values, low: float, high: float, *, steps: int = 24):

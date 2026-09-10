@@ -91,12 +91,20 @@ from ..data.projection import (
 )
 from ..gui.theme import BORDER, SURFACE, TEXT, TEXT_FAINT, TEXT_MUTED
 from ..gui.viewer import ImageWindow
-from .palette import UNKNOWN_COLOUR, colours_for, is_unknown, sort_values
+from . import palettes, shapes
+from .palette import (
+    UNKNOWN_COLOUR,
+    colours_for,
+    is_unknown,
+    set_active_palette,
+    sort_values,
+)
 from .cluster_panel import ClusterPanel
+from .grid_view import BY_NAME, BY_SIZE, SORT_LABELS, GridView, build_groups
 from .metadata_panel import MetadataPanel
 from .stats_panel import StatsPanel
 from .selection_panel import SelectionPanel
-from .scatter import EmbeddingScatter
+from .scatter import BACKGROUND_CHOICES, EmbeddingScatter
 
 # Legend gets unreadable long before this; past it, colour still encodes the
 # grouping but the legend is replaced by a count.
@@ -112,6 +120,10 @@ _MISSING = object()
 # holds its own image, so an unbounded comparison of a 5,000-point lasso would
 # exhaust memory long before it became something anyone could look at.
 MAX_COMPARE_COLUMNS = 24
+
+# Most groups a facet variable may have before it is not offered. Well (96+)
+# is past the point where a grid tells you anything a single plot does not.
+MAX_FACET_GROUPS = 60
 
 # Subsample choices, as a share of the dataset.
 FULL_SAMPLE = "100% (all)"
@@ -316,6 +328,8 @@ class EmbeddingExplorer(QWidget):
         # set_image_mode. Selection, lasso analysis and filtering are
         # unaffected, because none of them touch an image.
         self._image_mode = True
+        # Facet variable, or None for a single plot.
+        self._group_column: str | None = None
         # row -> resolved path, memoising the filesystem stat behind it.
         self._path_cache: dict[int, Path | None] = {}
         self._windows: list[ImageWindow] = []
@@ -518,6 +532,90 @@ class EmbeddingExplorer(QWidget):
         self.legend_box.setChecked(True)
         self.legend_box.toggled.connect(self._redraw)
 
+        # --- grouping / faceting
+        self.group_box = QComboBox()
+        self.group_box.setToolTip(
+            "Split the plot into one panel per value of a variable.\n"
+            "Answers 'does this cluster exist in every plate?', which colour "
+            "cannot at these point counts because the groups overlap."
+        )
+        self.group_box.currentIndexChanged.connect(self._on_group_changed)
+
+        self.shared_axes_box = QCheckBox("Shared axes")
+        self.shared_axes_box.setChecked(True)
+        self.shared_axes_box.setToolTip(
+            "On (default): every panel shows the same region, so position and "
+            "spread are comparable between groups.\n\n"
+            "Off: each panel autoscales to its own points. Shows a group's "
+            "internal structure, but makes groups look alike even when they "
+            "occupy completely different parts of the embedding."
+        )
+        self.shared_axes_box.toggled.connect(self._redraw)
+
+        self.grid_columns_box = QComboBox()
+        self.grid_columns_box.addItem("Automatic", 0)
+        for count in (1, 2, 3, 4, 5, 6):
+            self.grid_columns_box.addItem(f"{count} columns", count)
+        self.grid_columns_box.currentIndexChanged.connect(self._redraw)
+
+        self.grid_sort_box = QComboBox()
+        for key in (BY_SIZE, BY_NAME):
+            self.grid_sort_box.addItem(SORT_LABELS[key], key)
+        self.grid_sort_box.currentIndexChanged.connect(self._redraw)
+
+        self.grid_page_label = QLabel("")
+        self.grid_prev = QPushButton("◀")
+        self.grid_prev.setFixedWidth(30)
+        self.grid_prev.clicked.connect(lambda: self._step_page(-1))
+        self.grid_next = QPushButton("▶")
+        self.grid_next.setFixedWidth(30)
+        self.grid_next.clicked.connect(lambda: self._step_page(1))
+        page_row = QHBoxLayout()
+        page_row.setContentsMargins(0, 0, 0, 0)
+        page_row.addWidget(self.grid_prev)
+        page_row.addWidget(self.grid_page_label, 1)
+        page_row.addWidget(self.grid_next)
+        self.grid_page_widget = QWidget()
+        self.grid_page_widget.setLayout(page_row)
+
+        # --- a second encoding: shape, independent of colour
+        self.shape_box = QComboBox()
+        self.shape_box.setToolTip(
+            "Map a second variable to point shape, so colour and shape carry "
+            "different fields at once — colour by antibiotic, shape by "
+            "dataset.\n\n"
+            "Only a handful of shapes are distinguishable at plot size, so "
+            "this suits fields with few categories."
+        )
+        self.shape_box.currentIndexChanged.connect(self.schedule_redraw)
+
+        self.shape_hint = QLabel("")
+        self.shape_hint.setWordWrap(True)
+        self.shape_hint.hide()
+
+        self.palette_box = QComboBox()
+        self.palette_box.setToolTip(
+            "Which colours the categories or the numeric ramp use."
+        )
+        self.palette_box.currentIndexChanged.connect(self._on_palette_changed)
+
+        self.background_box = QComboBox()
+        for key, label in BACKGROUND_CHOICES:
+            self.background_box.addItem(label, key)
+        self.background_box.setToolTip(
+            "The plot's own ground, independent of the application theme.\n"
+            "Transparent exports with a real alpha channel, for dropping into "
+            "a figure that has its own background."
+        )
+        self.background_box.currentIndexChanged.connect(self._on_background_changed)
+
+        self.grey_out_box = QCheckBox("Grey out unselected")
+        self.grey_out_box.setToolTip(
+            "Draw everything except the current selection in grey, so the "
+            "selection stands out. Works for clicks, shift-clicks and lassos."
+        )
+        self.grey_out_box.toggled.connect(self._on_grey_out_toggled)
+
         self.density_box = QCheckBox("Density")
         self.density_box.setToolTip(
             "Draw where points are concentrated instead of every mark.\n"
@@ -537,11 +635,21 @@ class EmbeddingExplorer(QWidget):
         display_form = QFormLayout()
         display_form.setContentsMargins(6, 4, 6, 4)
         display_form.addRow("Colour by", self.colour_box)
+        display_form.addRow("Palette", self.palette_box)
+        display_form.addRow("Shape by", self.shape_box)
+        display_form.addRow(self.shape_hint)
+        display_form.addRow("Background", self.background_box)
         display_form.addRow("Point size", self.size_slider)
         display_form.addRow("Opacity", self.opacity_slider)
         display_form.addRow(self.legend_box)
         display_form.addRow(self.dim_others_box)
+        display_form.addRow(self.grey_out_box)
         display_form.addRow(self.density_box)
+        display_form.addRow("Display by", self.group_box)
+        display_form.addRow(self.shared_axes_box)
+        display_form.addRow("Grid", self.grid_columns_box)
+        display_form.addRow("Order", self.grid_sort_box)
+        display_form.addRow(self.grid_page_widget)
         display_group = QGroupBox("Display")
         display_group.setLayout(display_form)
 
@@ -617,6 +725,14 @@ class EmbeddingExplorer(QWidget):
         self.scatter.points_selected.connect(self._on_selection)
         self.cluster_panel.clear_requested.connect(self.scatter.clear_selection)
 
+        # Facets report into exactly the same handlers as the single plot, so
+        # there is one selection however it was made.
+        self.grid = GridView()
+        self.grid.point_clicked.connect(self._on_point_clicked)
+        self.grid.point_activated.connect(self._on_click)
+        self.grid.points_selected.connect(self._on_selection)
+        self.grid.hide()
+
         self.message = QLabel("")
         self.message.setWordWrap(True)
         self.message.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -672,6 +788,7 @@ class EmbeddingExplorer(QWidget):
         centre.addWidget(self.message, 1)
         centre.addWidget(self.compute_features_button, 0, Qt.AlignmentFlag.AlignCenter)
         centre.addWidget(self.scatter, 1)
+        centre.addWidget(self.grid, 1)
         centre_widget = QWidget()
         centre_widget.setLayout(centre)
 
@@ -932,7 +1049,10 @@ class EmbeddingExplorer(QWidget):
         self.result = None
         self.apply_suggested_params()
         self.metadata_panel.set_frame(self.frame)
+        self._rebuild_group_options()
+        self._rebuild_shape_options()
         self._rebuild_colour_options()
+        self._rebuild_palette_options()
         self._rebuild_filters()
         self._update_points_hint()
         run = self.dataset.run_info.get("model", "")
@@ -1003,7 +1123,10 @@ class EmbeddingExplorer(QWidget):
         self.result = None
         self.apply_suggested_params()
         self.metadata_panel.set_frame(self.frame)
+        self._rebuild_group_options()
+        self._rebuild_shape_options()
         self._rebuild_colour_options()
+        self._rebuild_palette_options()
         self._rebuild_filters()
         self._update_points_hint()
         self._set_message(
@@ -1058,7 +1181,10 @@ class EmbeddingExplorer(QWidget):
         self.result = None
         self.apply_suggested_params()
         self.metadata_panel.set_frame(self.frame)
+        self._rebuild_group_options()
+        self._rebuild_shape_options()
         self._rebuild_colour_options()
+        self._rebuild_palette_options()
         self._rebuild_filters()
         self._update_points_hint()
         self._set_message(
@@ -1471,19 +1597,19 @@ class EmbeddingExplorer(QWidget):
         if self.legend_box.isChecked() and len(ordered) <= MAX_LEGEND_ENTRIES:
             legend_entries = [(v or "(blank)", mapping[v]) for v in ordered]
 
-        self.scatter.set_points(
+        # Per-point colours as well as the grouped masks: the single plot uses
+        # the groups (one draw call each), while a facet needs to pick out the
+        # colours of an arbitrary subset, which only a per-point list allows.
+        point_colours = [mapping.get(v, UNKNOWN_COLOUR) for v in values]
+
+        self._draw(
             coords,
             visible,
-            [],
+            point_colours,
             groups=groups,
-            point_size=self.size_slider.value(),
-            opacity=self.opacity_slider.value() / 100.0,
             legend_entries=legend_entries,
             reset_view=reset_view,
         )
-
-        if self.density_box.isChecked():
-            self.scatter.set_density(True)
 
         label = field_label(column) if column else ""
         extra = "" if len(ordered) <= MAX_LEGEND_ENTRIES else f" · {len(ordered)} values"
@@ -1529,18 +1655,14 @@ class EmbeddingExplorer(QWidget):
             high = low + 1e-6
         colours, groups = ramp_over_array(values, low, high)
 
-        self.scatter.set_points(
+        self._draw(
             coords,
             visible,
             colours,
             groups=groups,
-            point_size=self.size_slider.value(),
-            opacity=self.opacity_slider.value() / 100.0,
             legend_entries=None,
             reset_view=reset_view,
         )
-        if self.density_box.isChecked():
-            self.scatter.set_density(True)
 
         from ..data.image_stats import STAT_LABELS
 
@@ -1551,6 +1673,85 @@ class EmbeddingExplorer(QWidget):
             f"<b>{len(coords):,}</b> of {len(rows):,} points · {label} "
             f"{low:,.0f}–{high:,.0f}{note}"
         )
+
+    def _draw(
+        self,
+        coords,
+        visible,
+        point_colours,
+        *,
+        groups=None,
+        legend_entries=None,
+        reset_view: bool = False,
+    ) -> None:
+        """Send one set of styled points to the single plot or to the facets.
+
+        Both colouring paths end here, so faceting, shapes, grey-out and the
+        background are applied once rather than duplicated per path -- and a
+        facet can never disagree with the single plot about how a point looks.
+        """
+        symbols = self._symbols_for(visible)
+        faceting = bool(self._group_column) and self.frame is not None
+
+        self.scatter.setVisible(not faceting)
+        self.grid.setVisible(faceting)
+
+        if not faceting:
+            self.grid.set_groups([])
+            self._update_page_label()
+            self.scatter.set_points(
+                coords,
+                visible,
+                point_colours,
+                groups=groups,
+                point_size=self.size_slider.value(),
+                opacity=self.opacity_slider.value() / 100.0,
+                symbols=symbols,
+                legend_entries=legend_entries,
+                reset_view=reset_view,
+            )
+            if self.density_box.isChecked():
+                self.scatter.set_density(True)
+            return
+
+        # Faceted: group by the chosen column over the points on screen.
+        values = self.frame.iloc[visible][self._group_column].astype(str).to_numpy()
+        groups_list, skipped = build_groups(values, max_groups=MAX_FACET_GROUPS)
+        self.grid.shared_axes = self.shared_axes_box.isChecked()
+        self.grid.columns = self.grid_columns_box.currentData() or 0
+        page = self.grid.page
+        self.grid.set_groups(groups_list, sort=self.grid_sort_box.currentData())
+        self.grid.set_page(page)
+        self.grid.render(
+            np.asarray(coords),
+            np.asarray(visible),
+            list(point_colours),
+            point_size=self.size_slider.value(),
+            opacity=self.opacity_slider.value() / 100.0,
+            symbols=symbols,
+            selected=self.scatter.selected_rows,
+            background=self.background_box.currentData(),
+        )
+        self._update_page_label()
+        if skipped:
+            self.status.emit(
+                f"showing the {MAX_FACET_GROUPS} largest groups; {skipped} smaller ones hidden"
+            )
+
+    def _symbols_for(self, visible) -> list[str] | None:
+        """Per-point symbols for the shape-by field, or None."""
+        column = self.shape_box.currentData()
+        if not column or self.frame is None or column not in self.frame.columns:
+            return None
+        values = self.frame.iloc[visible][column].astype(str).to_numpy()
+        ordered = sort_values(list(dict.fromkeys(values.tolist())))
+        mapping, overflow = shapes.assign(ordered)
+        if overflow:
+            self.shape_hint.setText(shapes.describe_overflow(overflow, len(ordered)))
+            self.shape_hint.show()
+        else:
+            self.shape_hint.hide()
+        return [mapping[v] for v in values]
 
     # -- selection --------------------------------------------------------
 
@@ -1566,6 +1767,116 @@ class EmbeddingExplorer(QWidget):
         self.cluster_panel.set_lasso_active(enabled)
         if enabled:
             self.status.emit("click to start an outline, click again to close it")
+
+    def _on_background_changed(self) -> None:
+        mode = self.background_box.currentData()
+        self.scatter.set_background(mode)
+        for facet in self.grid.facets:
+            facet.scatter.set_background(mode)
+
+    def _on_palette_changed(self) -> None:
+        """Switch the active palette and repaint."""
+        key = self.palette_box.currentData()
+        if key:
+            set_active_palette(key)
+        self._redraw()
+
+    def _rebuild_palette_options(self) -> None:
+        """Offer the palettes that suit the current colour variable.
+
+        Categorical and numeric colouring want different scales, and offering
+        viridis for a gene list (or Okabe-Ito for entropy) is offering the
+        wrong tool. The list follows what colour is currently encoding.
+        """
+        numeric = self._stat_column is not None
+        kinds = (
+            (palettes.SEQUENTIAL, palettes.DIVERGING)
+            if numeric
+            else (palettes.CATEGORICAL,)
+        )
+        previous = self.palette_box.currentData()
+        self.palette_box.blockSignals(True)
+        self.palette_box.clear()
+        for kind in kinds:
+            for palette in palettes.of_kind(kind):
+                self.palette_box.addItem(palette.name, palette.key)
+                index = self.palette_box.count() - 1
+                self.palette_box.setItemData(
+                    index, palette.description, Qt.ItemDataRole.ToolTipRole
+                )
+        index = self.palette_box.findData(previous)
+        if index < 0:
+            index = self.palette_box.findData(palettes.default_for(kinds[0]).key)
+        self.palette_box.setCurrentIndex(max(0, index))
+        self.palette_box.blockSignals(False)
+        key = self.palette_box.currentData()
+        if key:
+            set_active_palette(key)
+
+    def _rebuild_shape_options(self) -> None:
+        """Offer low-cardinality categoricals for shape."""
+        previous = self.shape_box.currentData()
+        self.shape_box.blockSignals(True)
+        self.shape_box.clear()
+        self.shape_box.addItem("None (all circles)", None)
+        if self.frame is not None:
+            for column in filter_fields(self.frame, max_values=shapes.MAX_SHAPES * 3):
+                self.shape_box.addItem(field_label(column), column)
+        index = self.shape_box.findData(previous)
+        self.shape_box.setCurrentIndex(max(0, index))
+        self.shape_box.blockSignals(False)
+
+    def _on_group_changed(self) -> None:
+        """Switch between one plot and a facet per group."""
+        self._group_column = self.group_box.currentData()
+        faceting = bool(self._group_column)
+        for widget in (
+            self.shared_axes_box,
+            self.grid_columns_box,
+            self.grid_sort_box,
+            self.grid_page_widget,
+        ):
+            widget.setEnabled(faceting)
+        self._redraw(reset_view=True)
+
+    def _on_grey_out_toggled(self, enabled: bool) -> None:
+        self.scatter.set_grey_out(enabled)
+        for facet in self.grid.facets:
+            facet.scatter.set_grey_out(enabled)
+        self._redraw()
+
+    def _step_page(self, delta: int) -> None:
+        self.grid.set_page(self.grid.page + delta)
+        self._redraw()
+
+    def _update_page_label(self) -> None:
+        pages = self.grid.n_pages
+        if pages <= 1:
+            self.grid_page_label.setText(
+                f"{self.grid.n_groups} group{'s' if self.grid.n_groups != 1 else ''}"
+            )
+            self.grid_prev.setEnabled(False)
+            self.grid_next.setEnabled(False)
+            return
+        self.grid_page_label.setText(
+            f"page {self.grid.page + 1} / {pages} · {self.grid.n_groups} groups"
+        )
+        self.grid_prev.setEnabled(self.grid.page > 0)
+        self.grid_next.setEnabled(self.grid.page < pages - 1)
+
+    def _rebuild_group_options(self) -> None:
+        """Offer every categorical column the frame actually has."""
+        previous = self.group_box.currentData()
+        self.group_box.blockSignals(True)
+        self.group_box.clear()
+        self.group_box.addItem("Off (single plot)", None)
+        if self.frame is not None:
+            for column in filter_fields(self.frame, max_values=MAX_FACET_GROUPS):
+                self.group_box.addItem(field_label(column), column)
+        index = self.group_box.findData(previous)
+        self.group_box.setCurrentIndex(max(0, index))
+        self.group_box.blockSignals(False)
+        self._group_column = self.group_box.currentData()
 
     def set_image_mode(self, enabled: bool) -> None:
         """Turn image tracing on or off for the whole explorer.
