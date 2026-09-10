@@ -1643,8 +1643,22 @@ class EmbeddingExplorer(QWidget):
             return
         params = self._params()
 
+        # In-memory first: switching back to an embedding already projected
+        # with these exact parameters should be instant, not a disk read.
+        # Keyed by params, not just by entry, because the same entry can
+        # legitimately hold both a UMAP and a t-SNE layout (or two parameter
+        # sets) side by side without either evicting the other.
+        entry = self.workspace.current
+        if entry is not None:
+            in_memory = entry.projections.get(params.key())
+            if in_memory is not None:
+                self._on_projection(in_memory)
+                return
+
         cached = self.cache.load(self.dataset.fingerprint(), params)
         if cached is not None:
+            if entry is not None:
+                entry.projections[params.key()] = cached
             self._on_projection(cached)
             return
 
@@ -1711,6 +1725,14 @@ class EmbeddingExplorer(QWidget):
             # The user walked away from this run; it is cached, not shown.
             return
         self.result = result
+        entry = self.workspace.current
+        if entry is not None:
+            # Keyed by parameters, so switching back to this embedding later
+            # (see _on_open_changed) finds it without recomputing, and a
+            # second method/parameter set on the same entry does not evict
+            # the first.
+            entry.projections[result.params.key()] = result
+            entry.last_result_key = result.params.key()
         self._set_message("")
         # A new projection is new coordinates: points that sat together no
         # longer do, so a selection made on the old layout describes nothing
@@ -2041,7 +2063,15 @@ class EmbeddingExplorer(QWidget):
         self.frame = entry.frame
         self.resolver = entry.resolver
         self._invalidate_paths()
-        self.result = None
+        # Restore whatever was last on screen for this entry, so switching
+        # back and forth between embeddings that have already been projected
+        # is instant rather than forcing a recompute every time. Falls back
+        # to None only for an entry that has never been projected at all.
+        self.result = (
+            entry.projections.get(entry.last_result_key)
+            if entry.last_result_key
+            else None
+        )
 
         self.metadata_panel.set_frame(self.frame)
         self._rebuild_group_options()
@@ -2058,10 +2088,18 @@ class EmbeddingExplorer(QWidget):
         self.scatter.set_selection(
             self.workspace.selection(key), notify=False
         )
-        self._set_message(
-            f"{entry.describe()}\n\nPress Compute projection to lay it out."
-        )
-        self.status.emit(f"switched to {entry.label()}")
+        if self.result is not None:
+            # Restored, not recomputed: draw it straight away rather than
+            # leaving the plot hidden behind a "press Compute" message that
+            # would be actively wrong -- the layout is already sitting there.
+            self._set_message("")
+            self._redraw(reset_view=True)
+            self.status.emit(f"switched to {entry.label()} — restored last view")
+        else:
+            self._set_message(
+                f"{entry.describe()}\n\nPress Compute projection to lay it out."
+            )
+            self.status.emit(f"switched to {entry.label()}")
 
     def _close_current_embedding(self) -> None:
         key = self.workspace.current_key

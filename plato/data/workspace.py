@@ -66,6 +66,10 @@ class EmbeddingEntry:
     # so switching UMAP <-> t-SNE, or between two parameter sets, is instant
     # after the first run of each.
     projections: dict = field(default_factory=dict)
+    # Which entry in `projections` was on screen when this entry was last
+    # the active one, so switching back restores exactly that view rather
+    # than an arbitrary one when several parameter sets have been tried.
+    last_result_key: str | None = None
     # Derived numeric columns (entropy, image statistics), computed once.
     derived: dict = field(default_factory=dict)
     # The image resolver for this entry's dataset, once found. None means
