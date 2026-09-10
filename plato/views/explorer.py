@@ -182,13 +182,17 @@ class _WorkerSignals(QObject):
 class _ProjectionTask(QRunnable):
     """Runs one projection off the GUI thread."""
 
-    def __init__(self, vectors, params, fingerprint, cache, signals) -> None:
+    def __init__(self, vectors, params, fingerprint, cache, signals, is_cancelled=None) -> None:
         super().__init__()
         self._vectors = vectors
         self._params = params
         self._fingerprint = fingerprint
         self._cache = cache
         self._signals = signals
+        # A callable rather than a captured bool: read fresh from the GUI
+        # thread's flag each time it is checked, so a cancel that arrives
+        # after the task started is still seen when the fit finishes.
+        self._is_cancelled = is_cancelled
 
     def run(self) -> None:  # pragma: no cover - worker thread
         try:
@@ -199,6 +203,7 @@ class _ProjectionTask(QRunnable):
                 cache=self._cache,
                 progress=self._signals.progress.emit,
                 on_progress=self._signals.advanced.emit,
+                is_cancelled=self._is_cancelled,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced in the UI
             try:
@@ -1059,46 +1064,66 @@ class EmbeddingExplorer(QWidget):
             )
 
     def _browse_for_source_data(self) -> None:
-        """Point this dataset at its images, with the dialog doing the work.
+        """Locate images for every open embedding, in one popup.
 
-        The dialog indexes whatever folder is chosen and reports what it found
-        -- how many images, how many rows they cover, and which neighbouring
-        folders to try when the pick is close but wrong. The old flow was a
-        bare picker followed by "none of this dataset's images were found",
-        which said neither what it saw nor what to do next.
+        Mirrors "Browse embeddings": one list, one row per embedding
+        currently open in the workspace, each independently scanned and
+        accepted. With one embedding open this is exactly the old single-
+        dataset flow; with several, locating them all no longer means
+        reopening the dialog once per entry with no memory of what was
+        already resolved.
+
+        The dialog indexes whatever folder is chosen per row and reports what
+        it found -- how many images, how many rows they cover, and which
+        neighbouring folders to try when the pick is close but wrong.
         """
-        if self.frame is None:
+        entries = self.workspace.entries
+        if not entries:
             return
-        from .locate_dialog import LocateDataDialog
+        from .locate_all_dialog import LocateAllDialog
 
-        dialog = LocateDataDialog(
-            self.frame,
-            start=self.resolver.root if self.resolver is not None else None,
-            parent=self,
+        dialog = LocateAllDialog(entries, parent=self)
+        if dialog.exec() != LocateAllDialog.DialogCode.Accepted:
+            return
+
+        results = dialog.results()
+        if not results:
+            return
+
+        remembered_root: Path | None = None
+        for entry in entries:
+            resolver = results.get(entry.key)
+            if resolver is None:
+                continue
+            entry.resolver = resolver
+            entry.resolver_searched = True
+            # Feed the same cache the automatic background hunt reads from,
+            # keyed by dataset directory, so switching to this entry again
+            # (or opening the same directory as a second embedding) does not
+            # re-hunt for a root that was just found by hand.
+            self._resolver_cache[str(entry.directory)] = (resolver, [])
+            if remembered_root is None:
+                remembered_root = resolver.root
+            if entry.key == self._active_key:
+                self.resolver = resolver
+                self._invalidate_paths()
+                self._update_source_label()
+                # Paths just changed, so any "image not found" entries can
+                # now resolve.
+                self.selection_panel.set_rows(list(self.selection_panel.rows))
+
+        # Remember one of them: this is the answer for every dataset from
+        # this screen, and its parent is where the sibling screens live.
+        if remembered_root is not None:
+            set_root(IMAGE_ROOT, remembered_root)
+            if get_root(DATA_LIBRARY) is None:
+                library = guess_data_library(remembered_root)
+                if library is not None:
+                    set_root(DATA_LIBRARY, library)
+
+        self.status.emit(
+            f"source data located for {len(results)} of {len(entries)} embedding(s)"
         )
-        if dialog.exec() != LocateDataDialog.DialogCode.Accepted:
-            return
-        if dialog.resolver is None:
-            return
-
-        self.resolver = dialog.resolver
-        self._invalidate_paths()
-        self.ambiguous_roots = []
-        self._resolving = False
-        root = self.resolver.root
-        # Remember it: this is the answer for every dataset from this screen,
-        # and its parent is where the sibling screens live.
-        set_root(IMAGE_ROOT, root)
-        if get_root(DATA_LIBRARY) is None:
-            library = guess_data_library(root)
-            if library is not None:
-                set_root(DATA_LIBRARY, library)
-        if self.dataset is not None:
-            self._resolver_cache[str(self.dataset.directory)] = (self.resolver, [])
-        self._update_source_label()
-        # Paths just changed, so any "image not found" entries can now resolve.
-        self.selection_panel.set_rows(list(self.selection_panel.rows))
-        self.status.emit(f"source data: {root}")
 
     def _update_source_label(self) -> None:
         """Say where previews come from, and whether that was a guess."""
@@ -1643,6 +1668,7 @@ class EmbeddingExplorer(QWidget):
                 self.dataset.fingerprint(),
                 self.cache,
                 signals,
+                is_cancelled=lambda: self._cancelled,
             )
         )
 
@@ -1663,16 +1689,18 @@ class EmbeddingExplorer(QWidget):
         """Abandon the run.
 
         The fit itself cannot be interrupted -- neither library takes a stop
-        flag -- so this detaches from the result rather than killing the work:
-        the worker finishes into a cache entry that a later run will reuse,
-        and the UI stops waiting. Saying so plainly beats a Cancel that
-        appears to hang.
+        flag -- so the worker keeps running until it naturally finishes; this
+        detaches the UI from waiting on it. What Cancel DOES guarantee: the
+        result is discarded rather than cached (see project()'s
+        ``is_cancelled``), so it cannot silently reappear as if it had
+        finished successfully the next time these parameters are used --
+        that would look exactly like a Cancel that did not work.
         """
         self._cancelled = True
         self._set_running(False)
         self._set_message(
-            "Cancelled. The projection is still finishing in the background "
-            "and will be cached, so computing it again will be instant."
+            "Cancelled. The result will not be kept or cached, even though "
+            "the computation finishes in the background."
         )
         self.status.emit("projection cancelled")
 

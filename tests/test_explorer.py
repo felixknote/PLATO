@@ -348,6 +348,43 @@ def test_projection_caches(tmp_path):
     np.testing.assert_allclose(first.coords, second.coords)
 
 
+def test_a_cancelled_projection_is_not_cached(tmp_path):
+    """Cancel must stop the result from silently reappearing on the next run.
+
+    Neither UMAP nor openTSNE can be interrupted mid-fit, so the computation
+    still runs to completion -- but it must not look like it succeeded.
+    Caching it anyway would mean the very next request for the same
+    parameters instantly returns the "cancelled" result, which is what
+    actually broke here before this was fixed.
+    """
+    rng = np.random.default_rng(0)
+    vectors = rng.normal(size=(150, 12)).astype(np.float32)
+    cache = ProjectionCache(tmp_path / "proj")
+    params = ProjectionParams(method=UMAP, n_neighbors=10, pca_components=6)
+
+    result = project(
+        vectors, params, fingerprint="abc", cache=cache, is_cancelled=lambda: True
+    )
+    assert result.coords.shape == (150, 2), "the fit still runs to completion"
+
+    # Nothing was written: a fresh request recomputes rather than finding a
+    # cache entry the cancelled run should not have been able to leave.
+    again = project(vectors, params, fingerprint="abc", cache=cache)
+    assert not again.from_cache
+
+
+def test_an_uncancelled_projection_still_caches(tmp_path):
+    """The cancellation hook must not break the ordinary case."""
+    rng = np.random.default_rng(0)
+    vectors = rng.normal(size=(150, 12)).astype(np.float32)
+    cache = ProjectionCache(tmp_path / "proj")
+    params = ProjectionParams(method=UMAP, n_neighbors=10, pca_components=6)
+
+    project(vectors, params, fingerprint="abc", cache=cache, is_cancelled=lambda: False)
+    again = project(vectors, params, fingerprint="abc", cache=cache)
+    assert again.from_cache
+
+
 def test_projection_subsamples(tmp_path):
     rng = np.random.default_rng(0)
     vectors = rng.normal(size=(300, 12)).astype(np.float32)

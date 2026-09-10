@@ -499,12 +499,21 @@ def project(
     cache: ProjectionCache | None = None,
     progress=None,
     on_progress=None,
+    is_cancelled=None,
 ) -> ProjectionResult:
     """Project ``vectors`` to 2-D, reusing a cached result when one exists.
 
     ``progress`` is an optional callable taking a status string.
     ``on_progress`` is an optional ``callable(fraction, message)`` driven by
     the backend's own reporting, for a determinate progress bar.
+
+    ``is_cancelled`` is an optional ``callable() -> bool``, checked right
+    after the (uninterruptible) fit returns. Neither UMAP nor openTSNE
+    exposes a way to stop a fit already in progress, so a cancelled run still
+    burns the CPU time -- but it must not look like it succeeded: skipping
+    the cache write here is what stops a "cancelled" run from silently
+    reappearing, fully computed, the next time the same parameters are asked
+    for.
     """
     import time
 
@@ -549,6 +558,12 @@ def project(
         seconds=time.perf_counter() - started,
         notes=notes,
     )
+    if is_cancelled is not None and is_cancelled():
+        # The work already happened -- there is no way to have stopped it --
+        # but a cancelled run must not leave behind a cache entry that makes
+        # the NEXT run of the same parameters silently return this result
+        # instead of actually computing.
+        return result
     if cache is not None and fingerprint:
         cache.save(fingerprint, result)
     return result
