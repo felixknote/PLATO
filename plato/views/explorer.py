@@ -53,6 +53,7 @@ from ..data.embeddings import (
     discover_datasets,
     load_dataset,
 )
+from ..data.workspace import SOURCE_COMPUTED, SOURCE_EXPORT, EmbeddingEntry, Workspace
 from ..data.explorer_model import (
     CONCENTRATION,
     CONDITION,
@@ -305,6 +306,10 @@ class EmbeddingExplorer(QWidget):
         self.work_dir = Path(work_dir)
         self.cache = ProjectionCache(self.work_dir / "projections")
 
+        # Every embedding open in this session. `self.dataset`/`self.frame`
+        # remain as the CURRENT entry's view of it, so the rest of the panel
+        # is unchanged; switching is a pointer move rather than a reload.
+        self.workspace = Workspace()
         self.dataset: EmbeddingDataset | None = None
         self.frame = None
         self.resolver: ImageResolver | None = None
@@ -332,6 +337,8 @@ class EmbeddingExplorer(QWidget):
         self._image_mode = True
         # Facet variable, or None for a single plot.
         self._group_column: str | None = None
+        # Which workspace entry the panel is currently showing.
+        self._active_key: str | None = None
         # row -> resolved path, memoising the filesystem stat behind it.
         self._path_cache: dict[int, Path | None] = {}
         self._windows: list[ImageWindow] = []
@@ -387,8 +394,43 @@ class EmbeddingExplorer(QWidget):
         source_row = QVBoxLayout()
         source_row.setContentsMargins(0, 0, 0, 0)
         source_row.setSpacing(4)
+        # Datasets available on disk vs embeddings actually OPEN are
+        # different lists: the first is a directory listing, the second is
+        # session state, and only the second can be switched between without
+        # a load.
+        self.open_box = QComboBox()
+        self.open_box.setToolTip(
+            "Embeddings loaded in this session. Switching between them is "
+            "instant — vectors, projections and selections are all kept."
+        )
+        self.open_box.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.open_box.setMinimumContentsLength(12)
+        self.open_box.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
+        self.open_box.currentIndexChanged.connect(self._on_open_changed)
+        self.open_box.hide()
+
+        self.close_button = QPushButton("✕")
+        self.close_button.setFixedWidth(26)
+        self.close_button.setToolTip("Close this embedding")
+        self.close_button.clicked.connect(self._close_current_embedding)
+        self.close_button.hide()
+
+        open_row = QHBoxLayout()
+        open_row.setContentsMargins(0, 0, 0, 0)
+        open_row.setSpacing(4)
+        open_row.addWidget(self.open_box, 1)
+        open_row.addWidget(self.close_button)
+        self.open_row_widget = QWidget()
+        self.open_row_widget.setLayout(open_row)
+        self.open_row_widget.hide()
+
         source_row.addWidget(self.dataset_box)
         source_row.addWidget(browse)
+        source_row.addWidget(self.open_row_widget)
         source_widget = QWidget()
         source_widget.setLayout(source_row)
 
@@ -1069,6 +1111,8 @@ class EmbeddingExplorer(QWidget):
         )
         self._invalidate_paths()
         self.resolver = self._start_resolving_images(self.frame)
+        self._register_entry(self.dataset, self.frame)
+        self._active_key = self.workspace.current_key
         self._update_source_label()
         self.result = None
         self.apply_suggested_params()
@@ -1201,6 +1245,8 @@ class EmbeddingExplorer(QWidget):
         # answer this without a search.
         self._invalidate_paths()
         self.resolver = self._start_resolving_images(self.frame)
+        self._register_entry(self.dataset, self.frame)
+        self._active_key = self.workspace.current_key
         self._update_source_label()
         self.result = None
         self.apply_suggested_params()
@@ -1799,6 +1845,102 @@ class EmbeddingExplorer(QWidget):
         self.cluster_panel.set_lasso_active(enabled)
         if enabled:
             self.status.emit("click to start an outline, click again to close it")
+
+    def _register_entry(self, dataset, frame, *, source=SOURCE_EXPORT) -> None:
+        """Add the just-loaded dataset to the workspace and make it current.
+
+        Loading the same directory twice is allowed on purpose -- an export's
+        own vectors and descriptors computed from the same images are two
+        embeddings of one dataset, and comparing them is exactly the kind of
+        question the workspace exists for.
+        """
+        info = dict(dataset.run_info) if isinstance(dataset.run_info, dict) else {}
+        entry = EmbeddingEntry(
+            name=dataset.name,
+            dataset=dataset,
+            frame=frame,
+            source=source,
+            info=info,
+        )
+        entry.resolver = self.resolver
+        self.workspace.add(entry)
+        self._sync_open_box()
+
+    def _sync_open_box(self) -> None:
+        """Refresh the open-embeddings chooser from the workspace."""
+        entries = self.workspace.entries
+        self.open_box.blockSignals(True)
+        self.open_box.clear()
+        for entry in entries:
+            self.open_box.addItem(entry.label(), entry.key)
+            self.open_box.setItemData(
+                self.open_box.count() - 1,
+                entry.describe(),
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        current = self.workspace.current_key
+        index = self.open_box.findData(current)
+        self.open_box.setCurrentIndex(max(0, index))
+        self.open_box.blockSignals(False)
+
+        # Only worth showing once there is a choice to make.
+        multiple = len(entries) > 1
+        self.open_row_widget.setVisible(multiple)
+        self.open_box.setVisible(multiple)
+        self.close_button.setVisible(multiple)
+
+    def _on_open_changed(self) -> None:
+        """Switch to another open embedding without reloading anything."""
+        key = self.open_box.currentData()
+        if not key or key == self._active_key:
+            return
+        entry = self.workspace.get(key)
+        if entry is None:
+            return
+
+        # Park the current selection with the entry it belongs to, so coming
+        # back finds it intact and it never indexes into other points.
+        if self._active_key:
+            self.workspace.set_selection(
+                self.scatter.selected_rows, self._active_key
+            )
+
+        self.workspace.set_current(key)
+        self._active_key = key
+        self.dataset = entry.dataset
+        self.frame = entry.frame
+        self.resolver = entry.resolver
+        self._invalidate_paths()
+        self.result = None
+
+        self.metadata_panel.set_frame(self.frame)
+        self._rebuild_group_options()
+        self._rebuild_shape_options()
+        self._rebuild_colour_options()
+        self._rebuild_palette_options()
+        self._rebuild_filters()
+        self.apply_suggested_params()
+        self._update_points_hint()
+        self._update_source_label()
+
+        # A projection already computed for this entry is reused as it is;
+        # otherwise the cache is consulted before anything is recomputed.
+        self.scatter.set_selection(
+            self.workspace.selection(key), notify=False
+        )
+        self._set_message(
+            f"{entry.describe()}\n\nPress Compute projection to lay it out."
+        )
+        self.status.emit(f"switched to {entry.label()}")
+
+    def _close_current_embedding(self) -> None:
+        key = self.workspace.current_key
+        if not key or len(self.workspace) <= 1:
+            return
+        self.workspace.remove(key)
+        self._active_key = None
+        self._sync_open_box()
+        self._on_open_changed()
 
     def _on_tsne_changed(self) -> None:
         """A t-SNE parameter changed: the current layout is now stale.

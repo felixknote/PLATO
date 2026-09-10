@@ -269,3 +269,82 @@ def test_image_canvas_stays_dark_in_both_themes():
         value = colours.image_background.lstrip("#")
         red, green, blue = (int(value[i : i + 2], 16) for i in (0, 2, 4))
         assert (red + green + blue) / 3 < 60, f"{colours.key} canvas is not dark"
+
+
+# -- the explorer actually using the workspace -------------------------------
+
+
+def test_explorer_keeps_several_embeddings_open(tmp_path):
+    """The end-to-end requirement: A, B and C switchable without reloading."""
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    from plato.data.workspace import SOURCE_COMPUTED
+    from plato.views.explorer import EmbeddingExplorer
+
+    app = QApplication.instance() or QApplication([])
+
+    class _Session:
+        pass
+
+    explorer = EmbeddingExplorer(_Session(), tmp_path)
+
+    def load(name, n, dims, directory, source=SOURCE_EXPORT):
+        entry = make_entry(name, n=n, dims=dims, source=source, directory=directory)
+        explorer.dataset = entry.dataset
+        explorer.frame = entry.frame
+        explorer._register_entry(entry.dataset, entry.frame, source=source)
+        explorer._active_key = explorer.workspace.current_key
+        return explorer.workspace.current_key
+
+    first = load("A", 40, 16, "/data/a")
+    second = load("B", 30, 16, "/data/b")
+    # Same directory, different vectors: an export and computed descriptors.
+    third = load("A", 40, 8, "/data/a", source=SOURCE_COMPUTED)
+
+    assert len(explorer.workspace) == 3
+    assert len({first, second, third}) == 3, "keys must be distinct"
+    assert len(explorer.workspace.find_by_directory("/data/a")) == 2
+
+    # Selections belong to their embedding.
+    explorer.open_box.setCurrentIndex(explorer.open_box.findData(first))
+    explorer.scatter.set_selection(np.arange(5))
+    explorer.open_box.setCurrentIndex(explorer.open_box.findData(second))
+    assert len(explorer.scatter.selected_rows) == 0
+
+    explorer.open_box.setCurrentIndex(explorer.open_box.findData(first))
+    assert len(explorer.scatter.selected_rows) == 5
+
+    # Switching is a pointer move, not a reload.
+    vectors = explorer.workspace.get(first).vectors
+    explorer.open_box.setCurrentIndex(explorer.open_box.findData(third))
+    explorer.open_box.setCurrentIndex(explorer.open_box.findData(first))
+    assert explorer.workspace.get(first).vectors is vectors
+    assert len(explorer.frame) == 40
+
+
+def test_closing_an_embedding_falls_back_to_another(tmp_path):
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    from plato.views.explorer import EmbeddingExplorer
+
+    QApplication.instance() or QApplication([])
+
+    class _Session:
+        pass
+
+    explorer = EmbeddingExplorer(_Session(), tmp_path)
+    for name in ("A", "B"):
+        entry = make_entry(name, n=20, directory=f"/data/{name}")
+        explorer.dataset = entry.dataset
+        explorer.frame = entry.frame
+        explorer._register_entry(entry.dataset, entry.frame)
+        explorer._active_key = explorer.workspace.current_key
+
+    assert len(explorer.workspace) == 2
+    explorer._close_current_embedding()
+    assert len(explorer.workspace) == 1
+    # The last one cannot be closed; there would be nothing to show.
+    explorer._close_current_embedding()
+    assert len(explorer.workspace) == 1
