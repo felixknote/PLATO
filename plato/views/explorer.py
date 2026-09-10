@@ -538,13 +538,23 @@ class EmbeddingExplorer(QWidget):
         self.cancel_button.clicked.connect(self._cancel_projection)
         self.cancel_button.hide()
 
-        projection_form = QFormLayout()
-        projection_form.setContentsMargins(6, 4, 6, 4)
-        projection_form.addRow("Dataset", source_widget)
-        projection_form.addRow("Source data", source_data_widget)
-        projection_form.addRow("Method", self.method_box)
-        projection_form.addRow("Neighbours", self.neighbours_box)
-        projection_form.addRow("Perplexity", self.perplexity_box)
+        # Split into what data is being looked at vs how it is projected --
+        # these used to share one "Projection" group, which mixed "which
+        # embedding" (Dataset, Source data, Open, Combine) with "how is it
+        # laid out" (Method, Neighbours, Subsample, Compute) in one flat
+        # 11-row form.
+        data_form = QFormLayout()
+        data_form.setContentsMargins(6, 4, 6, 4)
+        data_form.addRow("Dataset", source_widget)
+        data_form.addRow("Source data", source_data_widget)
+        data_group = QGroupBox("Data")
+        data_group.setLayout(data_form)
+
+        embedding_form = QFormLayout()
+        embedding_form.setContentsMargins(6, 4, 6, 4)
+        embedding_form.addRow("Method", self.method_box)
+        embedding_form.addRow("Neighbours", self.neighbours_box)
+        embedding_form.addRow("Perplexity", self.perplexity_box)
         points_column = QVBoxLayout()
         points_column.setContentsMargins(0, 0, 0, 0)
         points_column.setSpacing(4)
@@ -552,14 +562,14 @@ class EmbeddingExplorer(QWidget):
         points_column.addWidget(self.points_hint)
         points_widget = QWidget()
         points_widget.setLayout(points_column)
-        projection_form.addRow("Subsample", points_widget)
-        projection_form.addRow(self.deterministic_box)
-        projection_form.addRow(self.run_button)
-        projection_form.addRow(self.progress_bar)
-        projection_form.addRow(self.progress_label)
-        projection_form.addRow(self.cancel_button)
-        projection_group = QGroupBox("Projection")
-        projection_group.setLayout(projection_form)
+        embedding_form.addRow("Subsample", points_widget)
+        embedding_form.addRow(self.deterministic_box)
+        embedding_form.addRow(self.run_button)
+        embedding_form.addRow(self.progress_bar)
+        embedding_form.addRow(self.progress_label)
+        embedding_form.addRow(self.cancel_button)
+        projection_group = QGroupBox("Embedding")
+        projection_group.setLayout(embedding_form)
 
         # t-SNE has far more parameters that matter than UMAP does, and they
         # matter in ways that are easy to misread, so they get their own
@@ -692,26 +702,38 @@ class EmbeddingExplorer(QWidget):
         )
         self.dim_others_box.toggled.connect(self._redraw)
 
-        display_form = QFormLayout()
-        display_form.setContentsMargins(6, 4, 6, 4)
-        display_form.addRow("Colour by", self.colour_box)
-        display_form.addRow("Palette", self.palette_box)
-        display_form.addRow("Shape by", self.shape_box)
-        display_form.addRow(self.shape_hint)
-        display_form.addRow("Background", self.background_box)
-        display_form.addRow("Point size", self.size_slider)
-        display_form.addRow("Opacity", self.opacity_slider)
-        display_form.addRow(self.legend_box)
-        display_form.addRow(self.dim_others_box)
-        display_form.addRow(self.grey_out_box)
-        display_form.addRow(self.density_box)
-        display_form.addRow("Display by", self.group_box)
-        display_form.addRow(self.shared_axes_box)
-        display_form.addRow("Grid", self.grid_columns_box)
-        display_form.addRow("Order", self.grid_sort_box)
-        display_form.addRow(self.grid_page_widget)
-        display_group = QGroupBox("Display")
-        display_group.setLayout(display_form)
+        # Split into HOW EACH POINT LOOKS (encoding: colour, shape, size,
+        # background -- properties of one point) vs HOW POINTS ARE ARRANGED
+        # ON SCREEN (grouping: one plot or a grid of them, faceted by which
+        # variable). These used to share one 16-row "Display" group, where
+        # "Display by" (a facet variable) sat two rows from "Colour by" and
+        # "Shape by" (both point properties) with no visual distinction --
+        # exactly the kind of name collision that motivated this split.
+        encoding_form = QFormLayout()
+        encoding_form.setContentsMargins(6, 4, 6, 4)
+        encoding_form.addRow("Colour by", self.colour_box)
+        encoding_form.addRow("Palette", self.palette_box)
+        encoding_form.addRow("Shape by", self.shape_box)
+        encoding_form.addRow(self.shape_hint)
+        encoding_form.addRow("Background", self.background_box)
+        encoding_form.addRow("Point size", self.size_slider)
+        encoding_form.addRow("Opacity", self.opacity_slider)
+        encoding_form.addRow(self.legend_box)
+        encoding_form.addRow(self.dim_others_box)
+        encoding_form.addRow(self.grey_out_box)
+        encoding_form.addRow(self.density_box)
+        encoding_group = QGroupBox("Encoding")
+        encoding_group.setLayout(encoding_form)
+
+        grouping_form = QFormLayout()
+        grouping_form.setContentsMargins(6, 4, 6, 4)
+        grouping_form.addRow("Display by", self.group_box)
+        grouping_form.addRow(self.shared_axes_box)
+        grouping_form.addRow("Grid", self.grid_columns_box)
+        grouping_form.addRow("Order", self.grid_sort_box)
+        grouping_form.addRow(self.grid_page_widget)
+        grouping_group = QGroupBox("Grouping")
+        grouping_group.setLayout(grouping_form)
 
         # --- lasso analysis
         #
@@ -758,13 +780,15 @@ class EmbeddingExplorer(QWidget):
         left = QVBoxLayout()
         left.setContentsMargins(10, 10, 10, 10)
         left.setSpacing(10)
-        # Order follows the workflow: choose data, project it, style it,
-        # analyse a region, filter. Image Statistics goes LAST because it is
-        # the only optional, expensive step -- it belongs where you arrive
-        # after everything else, not in the middle of the styling controls.
+        # Order follows the workflow: choose data, project it, encode it,
+        # group it, analyse a region, filter. Image Statistics goes LAST
+        # because it is the only optional, expensive step -- it belongs where
+        # you arrive after everything else, not in the middle of styling.
+        left.addWidget(data_group)
         left.addWidget(projection_group)
         left.addWidget(self.tsne_group)
-        left.addWidget(display_group)
+        left.addWidget(encoding_group)
+        left.addWidget(grouping_group)
         left.addWidget(cluster_group)
         left.addLayout(self.filter_layout)
         left.addWidget(clear_filters)
