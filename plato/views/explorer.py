@@ -113,6 +113,7 @@ from .cluster_panel import ClusterPanel
 from .tsne_panel import TsnePanel
 from .grid_view import BY_NAME, BY_SIZE, SORT_LABELS, GridView, build_groups
 from .metadata_panel import MetadataPanel
+from .open_embeddings_list import OpenEmbeddingsList
 from .stats_panel import StatsPanel
 from .selection_panel import SelectionPanel
 from .scatter import BACKGROUND_CHOICES, EmbeddingScatter
@@ -410,36 +411,13 @@ class EmbeddingExplorer(QWidget):
         # Datasets available on disk vs embeddings actually OPEN are
         # different lists: the first is a directory listing, the second is
         # session state, and only the second can be switched between without
-        # a load.
-        self.open_box = QComboBox()
-        self.open_box.setToolTip(
-            "Embeddings loaded in this session. Switching between them is "
-            "instant — vectors, projections and selections are all kept."
-        )
-        self.open_box.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        self.open_box.setMinimumContentsLength(12)
-        self.open_box.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
-        )
-        self.open_box.currentIndexChanged.connect(self._on_open_changed)
-        self.open_box.hide()
-
-        self.close_button = QPushButton("✕")
-        self.close_button.setFixedWidth(26)
-        self.close_button.setToolTip("Close this embedding")
-        self.close_button.clicked.connect(self._close_current_embedding)
-        self.close_button.hide()
-
-        open_row = QHBoxLayout()
-        open_row.setContentsMargins(0, 0, 0, 0)
-        open_row.setSpacing(4)
-        open_row.addWidget(self.open_box, 1)
-        open_row.addWidget(self.close_button)
-        self.open_row_widget = QWidget()
-        self.open_row_widget.setLayout(open_row)
-        self.open_row_widget.hide()
+        # a load. Every open one gets its own row -- see
+        # open_embeddings_list.py for why this is not a checkbox-per-row
+        # "show several at once", which the single-scatter architecture does
+        # not support; Combine below is the real answer to that.
+        self.open_list = OpenEmbeddingsList()
+        self.open_list.activated.connect(self._switch_to)
+        self.open_list.close_requested.connect(self._close_embedding)
 
         # Projecting several open embeddings together as one fit, so position
         # is actually comparable between them -- see joint_projection.py for
@@ -455,7 +433,7 @@ class EmbeddingExplorer(QWidget):
 
         source_row.addWidget(self.dataset_box)
         source_row.addWidget(browse)
-        source_row.addWidget(self.open_row_widget)
+        source_row.addWidget(self.open_list)
         source_row.addWidget(self.combine_button)
         source_widget = QWidget()
         source_widget.setLayout(source_row)
@@ -1050,16 +1028,10 @@ class EmbeddingExplorer(QWidget):
         if loaded and self.workspace.current is not None:
             # Land on the last one loaded rather than whatever was current
             # before -- that is what "just loaded" means to the user.
-            # _switch_to directly: _load_embedding_directory already left
-            # _active_key on the last entry it loaded, so this is usually a
-            # no-op, but calling it explicitly rather than through the
-            # combobox signal is what stays correct if that ever changes.
+            # _load_embedding_directory already left _active_key on the last
+            # entry it loaded, so this is usually a no-op; calling it
+            # explicitly is what stays correct if that ever changes.
             self._switch_to(self.workspace.current.key)
-            index = self.open_box.findData(self.workspace.current.key)
-            if index >= 0:
-                self.open_box.blockSignals(True)
-                self.open_box.setCurrentIndex(index)
-                self.open_box.blockSignals(False)
 
         summary = f"loaded {loaded} embedding{'s' if loaded != 1 else ''}"
         if failed:
@@ -1192,17 +1164,10 @@ class EmbeddingExplorer(QWidget):
 
         # Already open in this session (loaded via this dropdown before, or
         # via the multi-folder loader): switch to it instead of reloading
-        # and creating a duplicate entry for the same directory. _switch_to
-        # directly, not setCurrentIndex -- which is a no-op, signal included,
-        # when the combobox already shows that index.
+        # and creating a duplicate entry for the same directory.
         existing = self.workspace.find_by_directory(Path(directory))
         if existing:
             self._switch_to(existing[0].key)
-            index = self.open_box.findData(existing[0].key)
-            if index >= 0:
-                self.open_box.blockSignals(True)
-                self.open_box.setCurrentIndex(index)
-                self.open_box.blockSignals(False)
             return
 
         self._load_embedding_directory(Path(directory), announce=True)
@@ -2065,54 +2030,57 @@ class EmbeddingExplorer(QWidget):
         The lower-level primitive _register_entry and the joint-projection
         path both fall through to this, so there is exactly one place an
         entry actually joins the workspace.
+
+        Workspace.add() makes the new entry current in the WORKSPACE, but
+        self._active_key is the explorer's own mirror of that and does not
+        follow automatically. Some callers (_load_embedding_directory) go on
+        to set self.dataset/self.frame/self._active_key themselves right
+        after this returns, in which case this is a harmless no-op via
+        _switch_to's own "already active" guard; callers that do NOT
+        (_combine_embeddings used to be one, and a plain _add_entry call from
+        anywhere else would silently be another) previously left the mirror
+        pointing at the PREVIOUS entry -- verified: adding a third embedding
+        while a different one was being viewed left self._active_key on the
+        one being viewed instead of the one just added, so closing what
+        LOOKED like a non-active row actually closed the one truly active.
         """
         self.workspace.add(entry)
         self._sync_open_box()
+        if self.workspace.current_key == entry.key and self._active_key != entry.key:
+            self._switch_to(entry.key)
 
     def _sync_open_box(self) -> None:
-        """Refresh the open-embeddings chooser from the workspace."""
+        """Refresh the open-embeddings list from the workspace.
+
+        Rebuilds the whole list rather than diffing -- see
+        OpenEmbeddingsList.set_entries. Combining needs two REAL sources; a
+        lone joint entry (its sources since closed) cannot be combined with
+        anything new until another ordinary embedding is loaded alongside it,
+        which is the same "more than one" condition the list itself uses to
+        decide whether it is worth showing at all.
+        """
         entries = self.workspace.entries
-        self.open_box.blockSignals(True)
-        self.open_box.clear()
-        for entry in entries:
-            self.open_box.addItem(entry.label(), entry.key)
-            self.open_box.setItemData(
-                self.open_box.count() - 1,
-                entry.describe(),
-                Qt.ItemDataRole.ToolTipRole,
-            )
-        current = self.workspace.current_key
-        index = self.open_box.findData(current)
-        self.open_box.setCurrentIndex(max(0, index))
-        self.open_box.blockSignals(False)
+        self.open_list.set_entries(entries, self.workspace.current_key)
+        self.combine_button.setVisible(len(entries) > 1)
 
-        # Only worth showing once there is a choice to make.
-        multiple = len(entries) > 1
-        self.open_row_widget.setVisible(multiple)
-        self.open_box.setVisible(multiple)
-        self.close_button.setVisible(multiple)
-        # Combining needs two REAL sources; a lone joint entry (its sources
-        # since closed) cannot be combined with anything new until another
-        # ordinary embedding is loaded alongside it.
-        self.combine_button.setVisible(multiple)
+    def _close_embedding(self, key: str) -> None:
+        """Close one open embedding by key, from its row's own close button.
 
-    def _on_open_changed(self) -> None:
-        """The combobox's own signal: switch to whatever it now shows."""
-        key = self.open_box.currentData()
-        if key:
-            self._switch_to(key)
+        Unlike the old single "close the current one" button, any row can be
+        closed directly -- including one that is not currently active.
+        """
+        if len(self.workspace) <= 1:
+            return
+        closing_active = key == self.workspace.current_key
+        self.workspace.remove(key)
+        if closing_active:
+            self._active_key = None
+        self._sync_open_box()
+        if self.workspace.current is not None:
+            self._switch_to(self.workspace.current.key)
 
     def _switch_to(self, key: str) -> None:
-        """Switch to another open embedding without reloading anything.
-
-        The real work, callable directly and not only from the combobox's
-        signal -- which does NOT fire when setCurrentIndex is asked for the
-        index it is already showing. _sync_open_box moves the combobox to a
-        newly-added entry (Workspace.add makes it current) WHILE SIGNALS ARE
-        BLOCKED, so a caller that adds an entry and then sets the same index
-        again would see no signal and no switch at all; this is what
-        _combine_embeddings calls instead.
-        """
+        """Switch to another open embedding without reloading anything."""
         if key == self._active_key:
             return
         entry = self.workspace.get(key)
@@ -2132,6 +2100,10 @@ class EmbeddingExplorer(QWidget):
         self.frame = entry.frame
         self.resolver = entry.resolver
         self._invalidate_paths()
+        # Move the highlighted row, so the list's own visual state can never
+        # lag behind whichever entry is actually active -- every caller of
+        # _switch_to gets this for free rather than having to remember it.
+        self.open_list.set_entries(self.workspace.entries, key)
         # Restore whatever was last on screen for this entry, so switching
         # back and forth between embeddings that have already been projected
         # is instant rather than forcing a recompute every time. Falls back
@@ -2171,13 +2143,16 @@ class EmbeddingExplorer(QWidget):
             self.status.emit(f"switched to {entry.label()}")
 
     def _close_current_embedding(self) -> None:
+        """Close whichever embedding is currently active.
+
+        Kept as a convenience wrapper over _close_embedding(key) -- the row-
+        level close button in OpenEmbeddingsList closes ANY row directly, not
+        only the active one, which is the more general operation this now
+        delegates to.
+        """
         key = self.workspace.current_key
-        if not key or len(self.workspace) <= 1:
-            return
-        self.workspace.remove(key)
-        self._active_key = None
-        self._sync_open_box()
-        self._on_open_changed()
+        if key:
+            self._close_embedding(key)
 
     def _combine_embeddings(self) -> None:
         """Project several open embeddings together as one fit.

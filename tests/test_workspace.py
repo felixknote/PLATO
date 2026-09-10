@@ -271,6 +271,70 @@ def test_image_canvas_stays_dark_in_both_themes():
         assert (red + green + blue) / 3 < 60, f"{colours.key} canvas is not dark"
 
 
+# -- OS theme detection at first launch --------------------------------------
+
+
+def test_os_theme_detection_returns_a_valid_theme_key():
+    from PySide6.QtWidgets import QApplication
+
+    from plato.gui import themes
+    from plato.gui.app import _detect_os_theme
+
+    app = QApplication.instance() or QApplication([])
+    detected = _detect_os_theme(app)
+    assert detected in themes.THEMES
+
+
+def test_os_theme_maps_qt_scheme_correctly(monkeypatch):
+    """Light -> LIGHT, Dark -> DARK, Unknown/anything else -> DARK (the
+    long-standing default, for platforms that report no preference)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from plato.gui import themes
+    from plato.gui.app import _detect_os_theme
+
+    app = QApplication.instance() or QApplication([])
+
+    class _FakeHints:
+        def __init__(self, scheme):
+            self._scheme = scheme
+
+        def colorScheme(self):
+            return self._scheme
+
+    for scheme, expected in (
+        (Qt.ColorScheme.Light, themes.LIGHT),
+        (Qt.ColorScheme.Dark, themes.DARK),
+        (Qt.ColorScheme.Unknown, themes.DARK),
+    ):
+        monkeypatch.setattr(app, "styleHints", lambda s=scheme: _FakeHints(s))
+        assert _detect_os_theme(app) == expected
+
+
+def test_a_saved_theme_preference_is_not_overridden_by_os_detection():
+    """The manual Ctrl+D toggle persists and must win over the OS setting on
+    every launch after the first -- detection only matters when nothing has
+    been saved yet."""
+    from PySide6.QtCore import QSettings
+
+    from plato.gui import themes
+    from plato.gui.settings import APPLICATION, ORGANISATION
+
+    settings = QSettings(ORGANISATION, APPLICATION)
+    original = settings.value("theme", None)
+    try:
+        for choice in (themes.DARK, themes.LIGHT):
+            settings.setValue("theme", choice)
+            saved = settings.value("theme", None)
+            assert saved == choice, "a saved preference must be read back as-is"
+    finally:
+        if original is None:
+            settings.remove("theme")
+        else:
+            settings.setValue("theme", original)
+
+
 # -- the explorer actually using the workspace -------------------------------
 
 
@@ -307,18 +371,18 @@ def test_explorer_keeps_several_embeddings_open(tmp_path):
     assert len(explorer.workspace.find_by_directory("/data/a")) == 2
 
     # Selections belong to their embedding.
-    explorer.open_box.setCurrentIndex(explorer.open_box.findData(first))
+    explorer._switch_to(first)
     explorer.scatter.set_selection(np.arange(5))
-    explorer.open_box.setCurrentIndex(explorer.open_box.findData(second))
+    explorer._switch_to(second)
     assert len(explorer.scatter.selected_rows) == 0
 
-    explorer.open_box.setCurrentIndex(explorer.open_box.findData(first))
+    explorer._switch_to(first)
     assert len(explorer.scatter.selected_rows) == 5
 
     # Switching is a pointer move, not a reload.
     vectors = explorer.workspace.get(first).vectors
-    explorer.open_box.setCurrentIndex(explorer.open_box.findData(third))
-    explorer.open_box.setCurrentIndex(explorer.open_box.findData(first))
+    explorer._switch_to(third)
+    explorer._switch_to(first)
     assert explorer.workspace.get(first).vectors is vectors
     assert len(explorer.frame) == 40
 

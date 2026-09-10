@@ -87,7 +87,7 @@ def test_switching_back_restores_the_projection_without_recomputing(explorer):
     explorer._sync_open_box()
 
     # Land on A and give it a computed result, the way _on_projection does.
-    explorer.open_box.setCurrentIndex(explorer.open_box.findData(entry_a.key))
+    explorer._switch_to(entry_a.key)
     explorer._active_key = entry_a.key
     explorer.dataset = entry_a.dataset
     explorer.frame = entry_a.frame
@@ -97,11 +97,11 @@ def test_switching_back_restores_the_projection_without_recomputing(explorer):
     assert explorer.result is result
 
     # Switch to B, which has never been projected.
-    explorer.open_box.setCurrentIndex(explorer.open_box.findData(entry_b.key))
+    explorer._switch_to(entry_b.key)
     assert explorer.result is None, "B has no projection yet"
 
     # Switch back to A: must come back without recomputing.
-    explorer.open_box.setCurrentIndex(explorer.open_box.findData(entry_a.key))
+    explorer._switch_to(entry_a.key)
     assert explorer.result is result
     np.testing.assert_array_equal(explorer.result.coords, result.coords)
 
@@ -114,17 +114,17 @@ def test_switching_back_shows_the_plot_not_a_stale_message(explorer):
     explorer.workspace.add(entry_b)
     explorer._sync_open_box()
 
-    explorer.open_box.setCurrentIndex(explorer.open_box.findData(entry_a.key))
+    explorer._switch_to(entry_a.key)
     explorer._active_key = entry_a.key
     explorer.dataset = entry_a.dataset
     explorer.frame = entry_a.frame
     explorer._on_projection(_result(ProjectionParams(method=UMAP)))
 
-    explorer.open_box.setCurrentIndex(explorer.open_box.findData(entry_b.key))
+    explorer._switch_to(entry_b.key)
     assert explorer.message.isVisibleTo(explorer), "B has nothing to show yet"
     assert not explorer.scatter.isVisibleTo(explorer)
 
-    explorer.open_box.setCurrentIndex(explorer.open_box.findData(entry_a.key))
+    explorer._switch_to(entry_a.key)
     assert not explorer.message.isVisibleTo(explorer), "A's restored result must be shown"
     assert explorer.scatter.isVisibleTo(explorer)
 
