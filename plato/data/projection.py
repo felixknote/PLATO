@@ -86,8 +86,41 @@ class ProjectionParams:
     # UMAP
     n_neighbors: int = 500
     min_dist: float = 1.0
-    # t-SNE
+    # -- t-SNE
+    #
+    # Exposed because t-SNE is easy to misread and the defaults hide the
+    # ways it misleads (see distill.pub/2016/misread-tsne). Cluster SIZES
+    # mean nothing, distances BETWEEN clusters mean little, and both change
+    # with perplexity -- so reading one t-SNE at one perplexity is exactly the
+    # mistake these controls exist to prevent.
     perplexity: float = 30.0
+    # Neighbourhood size. Low values fragment real clusters into sub-blobs;
+    # high values merge distinct ones. openTSNE requires < n/3, enforced in
+    # the runner. Looking at two or three values is the standard advice.
+    n_iter: int = 500
+    # Iterations AFTER early exaggeration. A run that has not converged shows
+    # structure that is an artefact of where it stopped -- the classic
+    # "pinched" or filament-shaped clusters. 500 is a floor, not a target;
+    # 1000-2000 is normal for a converged layout.
+    early_exaggeration_iter: int = 250
+    early_exaggeration: float = 12.0
+    # Early exaggeration inflates attraction so clusters can separate before
+    # fine structure is fitted. Too little and clusters stay entangled; too
+    # much and everything collapses to points.
+    late_exaggeration: float = 0.0
+    # Applied during the main phase; 0 means "off" (openTSNE's None). Values
+    # above 1 spread clusters apart and are sometimes used to make structure
+    # legible in very large datasets. It changes the picture, so it is off by
+    # default and stated when on.
+    learning_rate: float = 0.0
+    # 0 means openTSNE's "auto" (n/early_exaggeration), which is almost always
+    # right. Too low and the layout does not move; too high and it explodes.
+    initialization: str = "pca"
+    # "pca" is reproducible and preserves global structure, so distances
+    # between well-separated clusters carry some meaning. "random" is the
+    # classic t-SNE default and shows only local structure. "spectral" uses
+    # the neighbour graph.
+    seed: int = 1
     # Subsample cap. None projects every point.
     max_points: int | None = None
     # Reproducible layout, or a fast one.
@@ -110,8 +143,18 @@ class ProjectionParams:
 
     def key(self) -> str:
         relevant = asdict(self)
+        tsne_only = (
+            "perplexity",
+            "n_iter",
+            "early_exaggeration_iter",
+            "early_exaggeration",
+            "late_exaggeration",
+            "learning_rate",
+            "initialization",
+        )
         if self.method == UMAP:
-            relevant.pop("perplexity")
+            for name in tsne_only:
+                relevant.pop(name, None)
         else:
             relevant.pop("n_neighbors")
             relevant.pop("min_dist")
@@ -164,9 +207,36 @@ def suggest(n_points: int, *, learned: bool = True) -> ProjectionParams:
         n_neighbors=neighbours,
         min_dist=1.0 if learned else 0.1,
         perplexity=perplexity,
+        n_iter=500,
+        early_exaggeration_iter=250,
+        early_exaggeration=12.0,
+        late_exaggeration=0.0,
+        learning_rate=0.0,
+        initialization="pca",
+        seed=RANDOM_STATE,
         max_points=max_points,
         deterministic=False,
     )
+
+
+# Iteration presets. The names describe what you get, not a number, because
+# the right count depends on the dataset -- but the ordering is the point:
+# a fast look is not a converged layout, and saying so beats a single default
+# that is quietly one or the other.
+TSNE_PRESETS: tuple[tuple[str, int, int], ...] = (
+    ("Fast exploration", 250, 125),
+    ("Standard", 500, 250),
+    ("High quality", 1500, 350),
+    ("Very high quality", 3000, 500),
+)
+
+
+def tsne_preset(name: str) -> tuple[int, int] | None:
+    """(n_iter, early_exaggeration_iter) for a preset name."""
+    for preset, iterations, early in TSNE_PRESETS:
+        if preset == name:
+            return iterations, early
+    return None
 
 
 @dataclass(slots=True)
@@ -298,22 +368,36 @@ def _run_tsne(data: np.ndarray, params: ProjectionParams, progress=None) -> np.n
 
     from .progress_taps import tsne_callback
 
-    # openTSNE requires perplexity < n_samples / 3.
+    # openTSNE requires perplexity < n_samples / 3. Clamped rather than
+    # rejected: a perplexity that is merely too large for a small subsample is
+    # a reasonable thing to have typed, and failing the run would lose it.
     perplexity = float(max(5.0, min(params.perplexity, (data.shape[0] - 1) / 3.0)))
-    n_iter = 500
+    n_iter = max(50, int(params.n_iter))
+    early_iter = max(0, int(params.early_exaggeration_iter))
 
-    # Unlike UMAP, openTSNE takes a real callback. The neighbour search before
+    # openTSNE takes a real callback. The neighbour search before
     # optimisation reports nothing, so it owns the first third of the bar and
     # the callback fills the rest.
     if progress is not None:
         progress(0.05, "finding nearest neighbours")
+
+    # "auto" is openTSNE's own adaptive choice and is almost always right;
+    # 0 in our params means "let it decide" rather than "use zero".
+    learning_rate = params.learning_rate if params.learning_rate > 0 else "auto"
+    exaggeration = params.late_exaggeration if params.late_exaggeration > 0 else None
+
     tsne = TSNE(
         n_components=2,
         perplexity=perplexity,
         metric=effective_metric(params),
+        initialization=params.initialization,
+        learning_rate=learning_rate,
+        early_exaggeration=params.early_exaggeration,
+        early_exaggeration_iter=early_iter,
+        exaggeration=exaggeration,
         # Unlike UMAP, openTSNE parallelises with a seed set, so this stays
         # reproducible AND threaded.
-        random_state=RANDOM_STATE,
+        random_state=int(params.seed),
         n_jobs=-1,
         n_iter=n_iter,
         callbacks=tsne_callback(progress, n_iter, offset=0.35, span=0.65),

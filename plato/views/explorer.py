@@ -67,6 +67,7 @@ from ..data.explorer_model import (
     WELL,
     ImageResolver,
     build_frame,
+    categorical_fields,
     colour_fields,
     distinct_values,
     field_label,
@@ -100,6 +101,7 @@ from .palette import (
     sort_values,
 )
 from .cluster_panel import ClusterPanel
+from .tsne_panel import TsnePanel
 from .grid_view import BY_NAME, BY_SIZE, SORT_LABELS, GridView, build_groups
 from .metadata_panel import MetadataPanel
 from .stats_panel import StatsPanel
@@ -512,6 +514,18 @@ class EmbeddingExplorer(QWidget):
         projection_form.addRow(self.cancel_button)
         projection_group = QGroupBox("Projection")
         projection_group.setLayout(projection_form)
+
+        # t-SNE has far more parameters that matter than UMAP does, and they
+        # matter in ways that are easy to misread, so they get their own
+        # grouped panel rather than more rows in the Projection form.
+        self.tsne_panel = TsnePanel()
+        self.tsne_panel.changed.connect(self._on_tsne_changed)
+        self.tsne_group = QGroupBox("t-SNE settings")
+        tsne_layout = QVBoxLayout()
+        tsne_layout.setContentsMargins(6, 4, 6, 4)
+        tsne_layout.addWidget(self.tsne_panel)
+        self.tsne_group.setLayout(tsne_layout)
+        self.tsne_group.hide()
         self.method_box.currentTextChanged.connect(self._sync_method_options)
 
         # --- display controls
@@ -699,6 +713,7 @@ class EmbeddingExplorer(QWidget):
         left.setContentsMargins(10, 10, 10, 10)
         left.setSpacing(10)
         left.addWidget(projection_group)
+        left.addWidget(self.tsne_group)
         left.addWidget(display_group)
         left.addWidget(cluster_group)
         left.addWidget(stats_group)
@@ -863,12 +878,21 @@ class EmbeddingExplorer(QWidget):
     def _sync_method_options(self) -> None:
         is_umap = self.method_box.currentText() == UMAP
         self.neighbours_box.setEnabled(is_umap)
-        self.perplexity_box.setEnabled(not is_umap)
+        # t-SNE's parameters live in their own panel, which replaces the
+        # single perplexity box whenever t-SNE is the method.
+        self.perplexity_box.setVisible(is_umap)
+        self.tsne_group.setVisible(not is_umap)
 
     def _set_message(self, text: str) -> None:
         self.message.setText(text)
         self.message.setVisible(bool(text))
-        self.scatter.setVisible(not text)
+        # Whichever plot is live must yield to a message and come back after.
+        # Asking for the scatter unconditionally would show it over the grid
+        # when faceting, so the choice is left to _draw.
+        showing = not text
+        faceting = bool(self._group_column)
+        self.scatter.setVisible(showing and not faceting)
+        self.grid.setVisible(showing and faceting)
 
     # -- dataset loading --------------------------------------------------
 
@@ -1419,7 +1443,7 @@ class EmbeddingExplorer(QWidget):
         total = self.dataset.n_points if self.dataset is not None else 0
         max_points = _cap_for(self.max_points_box.currentText(), total)
 
-        return ProjectionParams(
+        params = ProjectionParams(
             method=self.method_box.currentText(),
             normalize=base.normalize,
             pca_components=base.pca_components,
@@ -1430,6 +1454,11 @@ class EmbeddingExplorer(QWidget):
             max_points=max_points,
             deterministic=self.deterministic_box.isChecked(),
         )
+        # The t-SNE panel is the authority on t-SNE's parameters when it is
+        # the active method, so the two cannot drift apart.
+        if params.method == TSNE:
+            self.tsne_panel.apply_to(params)
+        return params
 
     def compute(self) -> None:
         if self.dataset is None:
@@ -1697,7 +1726,10 @@ class EmbeddingExplorer(QWidget):
         self.grid.setVisible(faceting)
 
         if not faceting:
-            self.grid.set_groups([])
+            # Drop the facets rather than hiding them: each owns a pyqtgraph
+            # scene, and a dozen of those behind a hidden widget is memory
+            # that accumulates on every switch.
+            self.grid.clear()
             self._update_page_label()
             self.scatter.set_points(
                 coords,
@@ -1768,6 +1800,17 @@ class EmbeddingExplorer(QWidget):
         if enabled:
             self.status.emit("click to start an outline, click again to close it")
 
+    def _on_tsne_changed(self) -> None:
+        """A t-SNE parameter changed: the current layout is now stale.
+
+        Deliberately does NOT recompute. A projection is seconds to minutes of
+        work and the user may be setting several parameters; recomputing on
+        each keystroke would make the panel unusable. The button says the
+        result is out of date instead.
+        """
+        if self.method_box.currentText() == TSNE and self.result is not None:
+            self.run_button.setText("Recompute projection")
+
     def _on_background_changed(self) -> None:
         mode = self.background_box.currentData()
         self.scatter.set_background(mode)
@@ -1820,7 +1863,9 @@ class EmbeddingExplorer(QWidget):
         self.shape_box.clear()
         self.shape_box.addItem("None (all circles)", None)
         if self.frame is not None:
-            for column in filter_fields(self.frame, max_values=shapes.MAX_SHAPES * 3):
+            for column in categorical_fields(
+                self.frame, max_values=shapes.MAX_SHAPES * 3
+            ):
                 self.shape_box.addItem(field_label(column), column)
         index = self.shape_box.findData(previous)
         self.shape_box.setCurrentIndex(max(0, index))
@@ -1871,7 +1916,7 @@ class EmbeddingExplorer(QWidget):
         self.group_box.clear()
         self.group_box.addItem("Off (single plot)", None)
         if self.frame is not None:
-            for column in filter_fields(self.frame, max_values=MAX_FACET_GROUPS):
+            for column in categorical_fields(self.frame, max_values=MAX_FACET_GROUPS):
                 self.group_box.addItem(field_label(column), column)
         index = self.group_box.findData(previous)
         self.group_box.setCurrentIndex(max(0, index))

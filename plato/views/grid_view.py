@@ -146,6 +146,18 @@ class GridView(QWidget):
 
     # -- data --------------------------------------------------------------
 
+    def clear(self) -> None:
+        """Drop every facet and its plot.
+
+        Called when the grid is left, not merely hidden: each facet owns a
+        pyqtgraph PlotWidget holding its own scene, items and cached arrays,
+        and keeping a dozen of those alive behind a hidden widget is a real
+        cost that accumulates every time the view is switched.
+        """
+        self._clear()
+        self._groups = []
+        self._page = 0
+
     def set_groups(
         self,
         groups: list[tuple[str, np.ndarray]],

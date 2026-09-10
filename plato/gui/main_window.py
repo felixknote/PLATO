@@ -41,6 +41,7 @@ from .branding import DISPLAY_STACK, WORDMARK_TRACKING, logo_pixmap
 from .load_dialog import LoadPlateDialog
 from .plates_dialog import PlatesDialog
 from .settings import SettingsDialog
+from . import themes
 from .theme import TEXT, TEXT_FAINT, TEXT_MUTED
 
 ORGANISATION = "plato"
@@ -378,6 +379,17 @@ class MainWindow(QMainWindow):
         view_menu.addAction(explorer_tab)
 
         view_menu.addSeparator()
+        self.dark_mode_action = QAction("Dark mode", self, checkable=True)
+        self.dark_mode_action.setShortcut("Ctrl+D")
+        self.dark_mode_action.setChecked(themes.is_dark())
+        self.dark_mode_action.setStatusTip(
+            "Switch the whole interface between light and dark. The plot "
+            "background is set separately, in the explorer."
+        )
+        self.dark_mode_action.toggled.connect(self.set_dark_mode)
+        view_menu.addAction(self.dark_mode_action)
+
+        view_menu.addSeparator()
         settings_action = QAction("Settings…", self)
         settings_action.triggered.connect(self.open_settings)
         view_menu.addAction(settings_action)
@@ -499,6 +511,24 @@ class MainWindow(QMainWindow):
             writer.writeheader()
             writer.writerows(rows)
         self._show_status(f"exported {len(rows)} annotations to {target}")
+
+    def set_dark_mode(self, dark: bool) -> None:
+        """Switch the whole application between light and dark.
+
+        Goes through plato.gui.themes rather than touching colours here: the
+        stylesheet, the Qt palette and every widget that baked colours into
+        its own sheet are all re-applied together. Persisted, so the choice
+        survives a restart.
+        """
+        themes.apply(themes.DARK if dark else themes.LIGHT)
+        from PySide6.QtCore import QSettings
+
+        from .settings import APPLICATION, ORGANISATION
+
+        QSettings(ORGANISATION, APPLICATION).setValue(
+            "theme", themes.DARK if dark else themes.LIGHT
+        )
+        self._show_status(f"{'dark' if dark else 'light'} mode")
 
     def open_settings(self) -> None:
         SettingsDialog(self).exec()

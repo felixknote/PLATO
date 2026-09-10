@@ -245,6 +245,46 @@ def filter_fields(frame: pd.DataFrame, *, max_values: int = 120) -> list[str]:
     return out
 
 
+def categorical_fields(
+    frame: pd.DataFrame, *, max_values: int = 60, min_values: int = 2
+) -> list[str]:
+    """Every column that behaves like a category, known or not.
+
+    ``filter_fields`` deliberately offers a curated shortlist, because a
+    filter panel with one box per column is unusable. Grouping and shape are
+    different: the question "split by whatever this dataset happens to carry"
+    is a legitimate one, and a dataset with its own columns -- a timepoint, a
+    donor, an instrument -- should be groupable by them without this module
+    having heard of them.
+
+    So the known fields come first, in their established display order, then
+    anything else the frame carries that has a usable number of distinct
+    values. Identifier-like columns (a distinct value per row) and constants
+    are excluded, since neither makes a group.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def offer(column: str) -> None:
+        if column in seen or column not in frame.columns:
+            return
+        if column in (IMAGE_NAME, IMAGE_PATH):
+            return
+        values = frame[column].astype(str)
+        distinct = values[values.ne("")].nunique()
+        if min_values <= distinct <= max_values:
+            ordered.append(column)
+        seen.add(column)
+
+    for column in FILTER_FIELDS:
+        offer(column)
+    for column in FIELD_LABELS:
+        offer(column)
+    for column in frame.columns:
+        offer(str(column))
+    return ordered
+
+
 def distinct_values(frame: pd.DataFrame, column: str) -> list[str]:
     """Sorted distinct values, with concentrations ordered by magnitude."""
     if column not in frame.columns:
