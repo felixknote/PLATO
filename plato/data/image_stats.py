@@ -33,6 +33,7 @@ STAT_NAMES: tuple[str, ...] = (
     "brightness",
     "contrast",
     "focus",
+    "entropy",
     "saturation",
     "background",
     "foreground",
@@ -42,10 +43,16 @@ STAT_LABELS = {
     "brightness": "Brightness (mean)",
     "contrast": "Contrast (std)",
     "focus": "Focus (edge energy)",
+    "entropy": "Entropy (bits)",
     "saturation": "Saturated pixels (%)",
     "background": "Background (5th pct)",
     "foreground": "Foreground (95th pct)",
 }
+
+# Bins for the intensity histogram entropy is computed over. 256 is the
+# resolution the eye can use and keeps the maximum at a round 8 bits; more
+# bins would mostly measure sensor noise, fewer would floor real differences.
+ENTROPY_BINS = 256
 
 STAT_HELP = {
     "brightness": "Mean pixel value. Separates plates imaged at different "
@@ -56,6 +63,11 @@ STAT_HELP = {
     "for sharp edges, low for a blurred or empty field.",
     "saturation": "Percentage of pixels at the very top of the dtype range. "
     "Anything above a few percent is clipped and its intensities are lost.",
+    "entropy": "Shannon entropy of the intensity histogram, in bits over 256 "
+    "bins (0-8). Measures how much intensity variation the field carries: a "
+    "blank or uniformly saturated field is near 0, a field full of structured "
+    "objects is high. Computed on the image's own range, so it describes "
+    "texture rather than exposure.",
     "background": "5th percentile. Where the empty parts of the field sit, "
     "which is what an offset or a stray light change moves.",
     "foreground": "95th percentile. Where the bright objects sit, largely "
@@ -105,10 +117,38 @@ def describe_raw(plane: np.ndarray) -> dict[str, float]:
         "brightness": float(as_float.mean()),
         "contrast": float(as_float.std()),
         "focus": focus,
+        "entropy": shannon_entropy(as_float),
         "saturation": saturated,
         "background": p05,
         "foreground": p95,
     }
+
+
+def shannon_entropy(values: np.ndarray, *, bins: int = ENTROPY_BINS) -> float:
+    """Entropy of the intensity histogram, in bits.
+
+    Computed over the image's OWN range, not a fixed one: the question is how
+    much structure the field carries, and normalising first means a dim field
+    and a bright field with the same texture score the same. That is the
+    opposite convention to ``brightness`` above, deliberately -- entropy is a
+    texture measure, brightness is an exposure measure.
+
+    Range is 0 (every pixel identical) to log2(bins) = 8 at 256 bins (every
+    level equally occupied). Returns 0.0 for a degenerate range rather than
+    NaN, since a uniform field genuinely has no intensity variation.
+    """
+    values = np.asarray(values, dtype=np.float32).ravel()
+    if values.size == 0:
+        return float("nan")
+    low, high = float(values.min()), float(values.max())
+    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        return 0.0
+    counts, _ = np.histogram(values, bins=bins, range=(low, high))
+    total = counts.sum()
+    if total <= 0:
+        return 0.0
+    probabilities = counts[counts > 0] / total
+    return float(-(probabilities * np.log2(probabilities)).sum())
 
 
 class StatsCache:

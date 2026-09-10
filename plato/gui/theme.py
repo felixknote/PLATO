@@ -39,7 +39,12 @@ FLAG = "#e8a33d"
 # as an edge, without being pure black, which makes dark pixels unjudgeable.
 IMAGE_BACKGROUND = "#0d0f12"
 
-STYLESHEET = f"""
+# The stylesheet as a TEMPLATE rather than a baked string.
+#
+# Every rule below is substituted at build time from a ThemeColours instance,
+# so light and dark share one definition and a rule added for one applies to
+# both. `STYLESHEET` remains as the dark sheet for anything importing it.
+_TEMPLATE = """
 QWidget {{
     background-color: {BACKGROUND};
     color: {TEXT};
@@ -304,6 +309,73 @@ QTabWidget::pane {{
 
 QDialogButtonBox QPushButton {{ min-width: 84px; }}
 """
+
+
+def build_stylesheet(colours) -> str:
+    """Render the template for one palette.
+
+    Takes a ``plato.gui.themes.ThemeColours``. Kept here rather than in
+    themes.py so the rules and their substitution stay in one file.
+    """
+    return _TEMPLATE.format(
+        BACKGROUND=colours.background,
+        SURFACE=colours.surface,
+        SURFACE_RAISED=colours.surface_raised,
+        BORDER=colours.border,
+        BORDER_STRONG=colours.border_strong,
+        TEXT=colours.text,
+        TEXT_MUTED=colours.text_muted,
+        TEXT_FAINT=colours.text_faint,
+        ACCENT=colours.accent,
+        ACCENT_HOVER=colours.accent_hover,
+        ACCENT_PRESSED=colours.accent_pressed,
+        IMAGE_BACKGROUND=colours.image_background,
+        DISPLAY_STACK=DISPLAY_STACK,
+    )
+
+
+def sync_module_constants(colours) -> None:
+    """Point this module's names at ``colours``.
+
+    Code that did ``from .theme import TEXT`` at import time keeps whatever it
+    captured -- nothing can change that -- but anything reading
+    ``theme.TEXT`` from now on sees the live theme. Widgets that need to
+    repaint implement ``restyle()``; see plato.gui.themes.apply.
+    """
+    globals().update(
+        BACKGROUND=colours.background,
+        SURFACE=colours.surface,
+        SURFACE_RAISED=colours.surface_raised,
+        BORDER=colours.border,
+        BORDER_STRONG=colours.border_strong,
+        TEXT=colours.text,
+        TEXT_MUTED=colours.text_muted,
+        TEXT_FAINT=colours.text_faint,
+        ACCENT=colours.accent,
+        ACCENT_HOVER=colours.accent_hover,
+        ACCENT_PRESSED=colours.accent_pressed,
+        FLAG=colours.flag,
+        IMAGE_BACKGROUND=colours.image_background,
+        STYLESHEET=build_stylesheet(colours),
+    )
+
+
+STYLESHEET = _TEMPLATE.format(
+    BACKGROUND=BACKGROUND,
+    SURFACE=SURFACE,
+    SURFACE_RAISED=SURFACE_RAISED,
+    BORDER=BORDER,
+    BORDER_STRONG=BORDER_STRONG,
+    TEXT=TEXT,
+    TEXT_MUTED=TEXT_MUTED,
+    TEXT_FAINT=TEXT_FAINT,
+    ACCENT=ACCENT,
+    ACCENT_HOVER=ACCENT_HOVER,
+    ACCENT_PRESSED=ACCENT_PRESSED,
+    IMAGE_BACKGROUND=IMAGE_BACKGROUND,
+    DISPLAY_STACK=DISPLAY_STACK,
+)
+
 
 
 def apply_theme(app: QApplication) -> None:
