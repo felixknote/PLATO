@@ -361,7 +361,9 @@ alphabetical sort order.
 **Display by** facets the plot into one panel per value of a field, with a
 shared legend above the grid when colour and facet encode different things
 (a facet split on the same field the colour is already showing does not
-repeat a legend that would just restate the panel titles).
+repeat a legend that would just restate the panel titles). A page never
+shows more than a 4×4 grid of panels; a field with more values pages instead
+of growing wider or shrinking panels further.
 
 **Hover and click.** Hovering previews the original micrograph with its
 metadata; clicking opens it in the same full-resolution viewer the browser
@@ -375,7 +377,11 @@ single plot or the faceted grid, legend included either way. The single-plot
 export is the live pyqtgraph scene, so its SVG is real vector geometry; the
 grid is composed from its own laid-out widgets at their genuine on-screen
 size, so a wide window exports wide rather than at some unrelated preferred
-size.
+size. The suggested filename names the dataset, method, encoding (colour
+field, or the facet grouping plus colour field when they differ) and an
+export timestamp, e.g. `Aug26_CRISPRi_ABx_tsne_grid_by_arm_colour_plate_20260911_093000.png`
+— so two exports from the same session never collide or look
+interchangeable later.
 
 ### MoA and pathway annotation
 

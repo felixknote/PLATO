@@ -1100,3 +1100,65 @@ def test_projection_task_reports_progress_and_finishes(tmp_path):
     # which the recorder above cannot verify.
     for name in ("progress", "advanced", "finished", "failed"):
         assert hasattr(_WorkerSignals(), name)
+
+
+# -- export filenames --------------------------------------------------------
+
+
+def test_export_name_identifies_dataset_method_encoding_and_time():
+    from plato.views.explorer import _suggested_export_name
+
+    name = _suggested_export_name(
+        dataset="Aug26 CRISPRi & ABx",
+        method="tsne",
+        column="plate",
+        group_column=None,
+        fmt="png",
+        stamp="20260911_093000",
+    )
+    assert name == "Aug26_CRISPRi_ABx_tsne_by_plate_20260911_093000.png"
+
+
+def test_export_name_for_a_facet_grid_names_the_grouping_not_the_colour():
+    from plato.views.explorer import _suggested_export_name
+
+    name = _suggested_export_name(
+        dataset="Aug26 CRISPRi & ABx",
+        method="umap",
+        column="plate",
+        group_column="experiment_arm",
+        fmt="svg",
+        stamp="20260911_093000",
+    )
+    assert name == (
+        "Aug26_CRISPRi_ABx_umap_grid_by_experiment_arm"
+        "_colour_plate_20260911_093000.svg"
+    )
+
+
+def test_export_name_omits_colour_suffix_when_it_matches_the_grouping():
+    from plato.views.explorer import _suggested_export_name
+
+    name = _suggested_export_name(
+        dataset="Aug26 CRISPRi & ABx",
+        method="umap",
+        column="experiment_arm",
+        group_column="experiment_arm",
+        fmt="png",
+        stamp="20260911_093000",
+    )
+    assert name == "Aug26_CRISPRi_ABx_umap_grid_by_experiment_arm_20260911_093000.png"
+
+
+def test_export_name_survives_a_missing_dataset_label():
+    from plato.views.explorer import _suggested_export_name
+
+    name = _suggested_export_name(
+        dataset="",
+        method="tsne",
+        column=None,
+        group_column=None,
+        fmt="png",
+        stamp="20260911_093000",
+    )
+    assert name == "tsne_plot_20260911_093000.png"

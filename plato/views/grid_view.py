@@ -45,9 +45,11 @@ from .scatter import EmbeddingScatter
 # should cost; past it the swatches are still correct, just not all shown.
 MAX_STRIP_ENTRIES = 16
 
-# Facets per page. Twelve 300px panels fill a large screen; beyond that they
-# stop being readable and paging is the honest answer.
-DEFAULT_PAGE_SIZE = 12
+# Facets per page, laid out at most MAX_GRID_COLUMNS wide. A 4x4 grid of
+# 300px panels fills a large screen; beyond that they stop being readable
+# and paging is the honest answer.
+MAX_GRID_COLUMNS = 4
+DEFAULT_PAGE_SIZE = MAX_GRID_COLUMNS * MAX_GRID_COLUMNS
 
 # Smallest a facet may be before it stops showing structure.
 MIN_PANEL_PX = 180
@@ -276,14 +278,15 @@ class GridView(QWidget):
         return self._groups[start : start + self.page_size]
 
     def column_count(self, n: int) -> int:
-        """Columns for ``n`` facets: as square as possible unless pinned."""
+        """Columns for ``n`` facets: as square as possible, capped at 4 wide."""
         if self.columns > 0:
-            return self.columns
+            return min(self.columns, MAX_GRID_COLUMNS)
         if n <= 0:
             return 1
         # A square-ish grid reads better than a long strip, and matches the
-        # aspect a window usually has.
-        return max(1, min(n, int(math.ceil(math.sqrt(n)))))
+        # aspect a window usually has -- but never wider than MAX_GRID_COLUMNS,
+        # so a page never exceeds a 4x4 layout.
+        return max(1, min(n, int(math.ceil(math.sqrt(n))), MAX_GRID_COLUMNS))
 
     # -- rendering ---------------------------------------------------------
 

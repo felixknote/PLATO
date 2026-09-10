@@ -14,6 +14,8 @@ re-draw the same coordinates, which is what keeps exploration fluid.
 from __future__ import annotations
 
 import os
+import re
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -139,6 +141,39 @@ MAX_FACET_GROUPS = 60
 # Subsample choices, as a share of the dataset.
 FULL_SAMPLE = "100% (all)"
 SUBSAMPLE_CHOICES = (FULL_SAMPLE, "50%", "25%", "10%", "5%", "1%")
+
+
+def _filename_slug(text: str | None) -> str:
+    """A safe, compact filename fragment -- alnum runs joined by underscores."""
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", str(text or "")).strip("_")
+    return cleaned
+
+
+def _suggested_export_name(
+    *,
+    dataset: str | None,
+    method: str,
+    column: str | None,
+    group_column: str | None,
+    fmt: str,
+    stamp: str,
+) -> str:
+    """Build an export filename identifying dataset, method, encoding and time.
+
+    Distinct exports must not collide or look interchangeable -- a bare
+    ``tsne_by_plot.png`` gave no way to tell two exports apart later.
+    """
+    faceting = bool(group_column)
+    parts = [p for p in (_filename_slug(dataset), _filename_slug(method)) if p]
+    if faceting:
+        parts.append(f"grid_by_{_filename_slug(group_column)}")
+        if column and column != group_column:
+            parts.append(f"colour_{_filename_slug(column)}")
+    else:
+        column_slug = _filename_slug(column)
+        parts.append(f"by_{column_slug}" if column_slug else "plot")
+    parts.append(stamp)
+    return "_".join(parts) + f".{fmt}"
 
 
 def _percent_of(text: str) -> float | None:
@@ -2916,10 +2951,13 @@ class EmbeddingExplorer(QWidget):
         method = self.result.params.method.replace("-", "")
         column = self.colour_box.currentData() or "plot"
         faceting = bool(self._group_column)
-        suggested = (
-            f"{method}_by_{self._group_column}_grid.{fmt}"
-            if faceting
-            else f"{method}_by_{column}.{fmt}"
+        suggested = _suggested_export_name(
+            dataset=self.dataset_box.currentText(),
+            method=method,
+            column=column,
+            group_column=self._group_column,
+            fmt=fmt,
+            stamp=datetime.now().strftime("%Y%m%d_%H%M%S"),
         )
         filters = "PNG image (*.png)" if fmt == "png" else "SVG vector (*.svg)"
         target, _ = QFileDialog.getSaveFileName(self, f"Export {fmt.upper()}", suggested, filters)

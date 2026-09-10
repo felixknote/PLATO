@@ -193,8 +193,15 @@ def test_column_count_is_squarish(grid):
     assert grid.column_count(1) == 1
     assert grid.column_count(4) == 2
     assert grid.column_count(9) == 3
+    grid.columns = 3
+    assert grid.column_count(9) == 3, "an explicit choice wins"
+
+
+def test_column_count_never_exceeds_a_4x4_page(grid):
+    assert grid.column_count(16) == 4
+    assert grid.column_count(25) == 4, "wide pages page instead of widening"
     grid.columns = 5
-    assert grid.column_count(9) == 5, "an explicit choice wins"
+    assert grid.column_count(9) == 4, "even an explicit choice is capped at 4"
 
 
 # -- t-SNE -------------------------------------------------------------------
