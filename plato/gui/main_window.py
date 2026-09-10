@@ -74,7 +74,7 @@ class MainWindow(QMainWindow):
         else:
             self._build_tabs()
 
-        self.showMaximized()
+        self._restore_geometry()
         self._restore_session()
 
     # -- empty state --------------------------------------------------------
@@ -110,7 +110,7 @@ class MainWindow(QMainWindow):
 
         hint = QLabel("Choose an image folder and a plate map to get started.")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 12px;")
+        hint.setObjectName("hint")
 
         load_button = QPushButton("Load Data")
         load_button.setFixedWidth(200)
@@ -287,11 +287,11 @@ class MainWindow(QMainWindow):
         """The empty Plate Browser tab: says what is missing, and fixes it."""
         message = QLabel("No plates loaded")
         message.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        message.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 15px;")
+        message.setObjectName("muted")
 
         hint = QLabel("Choose an image folder and a plate map to browse images.")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 12px;")
+        hint.setObjectName("hint")
 
         button = QPushButton("Load Data")
         button.setFixedWidth(200)
@@ -511,6 +511,43 @@ class MainWindow(QMainWindow):
             writer.writeheader()
             writer.writerows(rows)
         self._show_status(f"exported {len(rows)} annotations to {target}")
+
+    def _restore_geometry(self) -> None:
+        """Open at the last size used, or filling most of the screen.
+
+        showMaximized() alone was not enough, and produced a 357x435 window on
+        a 2560x1392 screen: it was called before the window had any content,
+        so "maximised" resolved against the layout's minimum size, and the
+        later show() in app.py re-applied that. Setting a real geometry first
+        gives the window something to restore DOWN to, and maximising after it
+        is realised measures against the screen instead.
+        """
+        saved = self.settings.value("window/geometry")
+        if saved is not None and self.restoreGeometry(saved):
+            if self.settings.value("window/maximized", True, type=bool):
+                self.showMaximized()
+            else:
+                self.show()
+            return
+
+        # No saved geometry: most of the available screen, centred, and
+        # maximised on top of that. The explicit size is what the window
+        # returns to when un-maximised.
+        available = self.screen().availableGeometry()
+        width = int(available.width() * 0.85)
+        height = int(available.height() * 0.85)
+        self.resize(width, height)
+        self.move(
+            available.x() + (available.width() - width) // 2,
+            available.y() + (available.height() - height) // 2,
+        )
+        self.showMaximized()
+
+    def closeEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt override
+        """Remember where and how big the window was."""
+        self.settings.setValue("window/geometry", self.saveGeometry())
+        self.settings.setValue("window/maximized", self.isMaximized())
+        super().closeEvent(event)
 
     def set_dark_mode(self, dark: bool) -> None:
         """Switch the whole application between light and dark.

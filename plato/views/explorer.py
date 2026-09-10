@@ -448,7 +448,7 @@ class EmbeddingExplorer(QWidget):
 
         self.source_label = QLabel("—")
         self.source_label.setWordWrap(True)
-        self.source_label.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 10px;")
+        self.source_label.setObjectName("hintSmall")
 
         source_data_row = QVBoxLayout()
         source_data_row.setContentsMargins(0, 0, 0, 0)
@@ -500,7 +500,7 @@ class EmbeddingExplorer(QWidget):
         self.max_points_box.currentTextChanged.connect(self._update_points_hint)
 
         self.points_hint = QLabel("")
-        self.points_hint.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 10px;")
+        self.points_hint.setObjectName("hintSmall")
 
         self.deterministic_box = QCheckBox("Reproducible (slower)")
         self.deterministic_box.setToolTip(
@@ -527,7 +527,7 @@ class EmbeddingExplorer(QWidget):
 
         self.progress_label = QLabel("")
         self.progress_label.setWordWrap(True)
-        self.progress_label.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 10px;")
+        self.progress_label.setObjectName("hintSmall")
         self.progress_label.hide()
 
         self.cancel_button = QPushButton("Cancel")
@@ -754,22 +754,31 @@ class EmbeddingExplorer(QWidget):
         left = QVBoxLayout()
         left.setContentsMargins(10, 10, 10, 10)
         left.setSpacing(10)
+        # Order follows the workflow: choose data, project it, style it,
+        # analyse a region, filter. Image Statistics goes LAST because it is
+        # the only optional, expensive step -- it belongs where you arrive
+        # after everything else, not in the middle of the styling controls.
         left.addWidget(projection_group)
         left.addWidget(self.tsne_group)
         left.addWidget(display_group)
         left.addWidget(cluster_group)
-        left.addWidget(stats_group)
         left.addLayout(self.filter_layout)
-        left.addStretch(1)
         left.addWidget(clear_filters)
+        left.addWidget(stats_group)
+        left.addStretch(1)
 
         left_container = QWidget()
         left_container.setLayout(left)
         left_scroll = QScrollArea()
         left_scroll.setWidget(left_container)
         left_scroll.setWidgetResizable(True)
-        left_scroll.setMinimumWidth(290)
-        left_scroll.setMaximumWidth(340)
+        # Resizable, not pinned. The controls grew past what 340px can hold --
+        # the t-SNE panel's nested groups clipped their own labels off the
+        # left edge at that width -- and a hard maximum meant the only way to
+        # read them was to not have them. The splitter now decides, within
+        # bounds that keep the plot usable.
+        left_scroll.setMinimumWidth(300)
+        left_scroll.setMaximumWidth(560)
         # Never a horizontal scrollbar: the controls should wrap into the
         # width they are given, not slide out of reach under one.
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -793,7 +802,7 @@ class EmbeddingExplorer(QWidget):
         self.message = QLabel("")
         self.message.setWordWrap(True)
         self.message.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.message.setStyleSheet(f"color: {TEXT_MUTED}; padding: 18px;")
+        self.message.setObjectName("message")
 
         self.compute_features_button = QPushButton("Compute features from images")
         self.compute_features_button.setToolTip(
@@ -805,7 +814,7 @@ class EmbeddingExplorer(QWidget):
         self._missing_vectors_dir: Path | None = None
 
         self.count_label = QLabel("—")
-        self.count_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        self.count_label.setObjectName("muted")
 
         # A global switch, in the toolbar rather than buried in a group, since
         # it changes what the whole right-hand half of the window is for.
@@ -1156,6 +1165,18 @@ class EmbeddingExplorer(QWidget):
             self._set_message(f"Could not read this export's metadata:\n{exc}")
             return
 
+        # Describing images requires reading them, so the image viewer being
+        # off is a hard stop rather than something to work around: turning it
+        # off is a statement that no pixel should be read.
+        if not self._image_mode:
+            QMessageBox.information(
+                self,
+                "Image statistics",
+                "Computing features reads every image, and the image viewer "
+                "is off.\n\nTurn it on first, then compute again.",
+            )
+            return
+
         resolver = self.resolver
         if resolver is None:
             resolver = self._resolve_images_now(metadata)
@@ -1187,6 +1208,11 @@ class EmbeddingExplorer(QWidget):
         )
         self.resolver = resolver
         self._invalidate_paths()
+        # Register it like any other load, or the workspace and the panel
+        # disagree about what is current and switching embeddings restores
+        # the wrong frame.
+        self._register_entry(dataset, self.frame, source=SOURCE_COMPUTED)
+        self._active_key = self.workspace.current_key
         self._update_source_label()
         self.result = None
         self.apply_suggested_params()

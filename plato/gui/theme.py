@@ -283,6 +283,44 @@ QLabel#panelHeading {{
     text-transform: uppercase;
 }}
 
+/* Semantic label roles.
+
+   These exist so that panels do NOT bake colours into their own stylesheets.
+   A widget that does setStyleSheet(f"color: {{TEXT}}") captures whatever the
+   constant held at import time and can never be restyled, which is what made
+   the first light-mode attempt leave half the interface dark. Setting an
+   object name instead means the colour comes from this sheet, and re-applying
+   the sheet restyles the widget for free. */
+QLabel#hint {{
+    color: {TEXT_FAINT};
+    font-size: 11px;
+}}
+QLabel#hintSmall {{
+    color: {TEXT_FAINT};
+    font-size: 10px;
+}}
+QLabel#muted {{
+    color: {TEXT_MUTED};
+}}
+QLabel#mutedSmall {{
+    color: {TEXT_MUTED};
+    font-size: 11px;
+}}
+QLabel#body {{
+    color: {TEXT};
+    font-size: 11px;
+}}
+QLabel#message {{
+    color: {TEXT_MUTED};
+    padding: 18px;
+}}
+/* The canvas an image or a plot sits on. Deliberately dark in both themes --
+   a light surround destroys the contrast a micrograph is judged on. */
+QLabel#imageCanvas {{
+    background: {IMAGE_BACKGROUND};
+    border-radius: 2px;
+}}
+
 QTabBar::tab {{
     background: {SURFACE};
     color: {TEXT_MUTED};

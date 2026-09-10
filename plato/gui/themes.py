@@ -54,6 +54,10 @@ class ThemeColours:
     accent_pressed: str
     flag: str
     image_background: str
+    # The ground a PLOT sits on. Separate from image_background because a
+    # scatter is chrome-like (its marks are theme colours) while a micrograph
+    # is not (its pixels are the data).
+    plot_background: str
 
 
 DARK_COLOURS = ThemeColours(
@@ -75,6 +79,7 @@ DARK_COLOURS = ThemeColours(
     # Darker than the panel so an image edge reads as an edge, but not black,
     # which makes dark pixels unjudgeable.
     image_background="#0d0f12",
+    plot_background="#0d0f12",
 )
 
 LIGHT_COLOURS = ThemeColours(
@@ -100,6 +105,11 @@ LIGHT_COLOURS = ThemeColours(
     # white surround around a fluorescence image destroys the contrast the
     # image is being judged on.
     image_background="#101216",
+    # A scatter plot is NOT an image canvas. Its marks are drawn in the
+    # theme's own palette on a ground that should match the chrome, so
+    # "Follow app theme" gives a light plot in light mode. Keeping it dark
+    # here made the light theme look half-applied.
+    plot_background="#ffffff",
 )
 
 THEMES = {DARK: DARK_COLOURS, LIGHT: LIGHT_COLOURS}

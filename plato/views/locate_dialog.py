@@ -93,11 +93,11 @@ class LocateDataDialog(QDialog):
             "folder per plate, arms in subfolders, or everything together."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet(f"color: {TEXT_MUTED};")
+        intro.setObjectName("muted")
 
         self.path_label = QLabel("No folder chosen")
         self.path_label.setWordWrap(True)
-        self.path_label.setStyleSheet(f"color: {TEXT};")
+        self.path_label.setObjectName("body")
 
         choose = QPushButton("Choose folder…")
         choose.clicked.connect(self._choose)
@@ -117,7 +117,7 @@ class LocateDataDialog(QDialog):
 
         self.result_label = QLabel("")
         self.result_label.setWordWrap(True)
-        self.result_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        self.result_label.setObjectName("muted")
 
         self.suggestions = QListWidget()
         self.suggestions.setMaximumHeight(130)
@@ -125,7 +125,7 @@ class LocateDataDialog(QDialog):
         self.suggestions.hide()
 
         self.suggestion_label = QLabel("Nearby folders — double-click to try one:")
-        self.suggestion_label.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 11px;")
+        self.suggestion_label.setObjectName("hint")
         self.suggestion_label.hide()
 
         self.buttons = QDialogButtonBox(

@@ -93,7 +93,7 @@ class ProgressDialog(QDialog):
         self.bar.setTextVisible(True)
 
         self.detail = QLabel("")
-        self.detail.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self.detail.setObjectName("mutedSmall")
 
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.clicked.connect(self._cancel)

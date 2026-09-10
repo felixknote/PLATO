@@ -56,7 +56,7 @@ class StatsPanel(QWidget):
             "useful for telling a real cluster from an acquisition artefact."
         )
         self.explain.setWordWrap(True)
-        self.explain.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 11px;")
+        self.explain.setObjectName("hint")
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
@@ -64,7 +64,7 @@ class StatsPanel(QWidget):
         self.progress.hide()
 
         self.progress_label = QLabel("")
-        self.progress_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self.progress_label.setObjectName("mutedSmall")
         self.progress_label.hide()
 
         self.cancel_button = QPushButton("Cancel")
@@ -87,12 +87,12 @@ class StatsPanel(QWidget):
 
         self.stat_help = QLabel("")
         self.stat_help.setWordWrap(True)
-        self.stat_help.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 10px;")
+        self.stat_help.setObjectName("hintSmall")
         self.stat_help.hide()
 
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
-        self.summary.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self.summary.setObjectName("mutedSmall")
         self.summary.hide()
 
         layout = QVBoxLayout()

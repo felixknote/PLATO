@@ -44,10 +44,13 @@ from ..gui import themes
 
 CUSTOM = "Custom"
 
+# Short labels: the panel lives in a sidebar, and a combo wide enough for a
+# sentence forces the whole column wider than the plot can spare. The full
+# explanation is on the control's tooltip.
 INITIALIZATIONS = (
-    ("pca", "PCA (reproducible, keeps global structure)"),
-    ("random", "Random (classic t-SNE, local structure only)"),
-    ("spectral", "Spectral (from the neighbour graph)"),
+    ("pca", "PCA"),
+    ("random", "Random"),
+    ("spectral", "Spectral"),
 )
 
 METRICS = ("cosine", "euclidean", "manhattan", "correlation", "chebyshev")
@@ -169,6 +172,10 @@ class TsnePanel(QWidget):
             "meaning. Random is the classic default and shows local "
             "structure only."
         )
+        self.initialization.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.initialization.setMinimumContentsLength(8)
         self.initialization.currentIndexChanged.connect(self.changed.emit)
 
         # -- reproducibility
@@ -195,7 +202,13 @@ class TsnePanel(QWidget):
         seed_widget = QWidget()
         seed_widget.setLayout(seed_row)
 
+        # Labels ABOVE their fields, not beside them. This panel sits inside a
+        # group box, inside another group box, inside a scrolling sidebar, and
+        # each level takes margin -- at which point a side label has so little
+        # width left that Qt clips it off the left edge entirely. Wrapping is
+        # what makes the panel fit any sidebar width.
         quality = QFormLayout()
+        quality.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         quality.setContentsMargins(6, 4, 6, 4)
         quality.addRow("Quality", self.preset_box)
         quality.addRow("Iterations", self.iterations)
@@ -204,6 +217,7 @@ class TsnePanel(QWidget):
         quality_group.setLayout(quality)
 
         neighbourhood = QFormLayout()
+        neighbourhood.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         neighbourhood.setContentsMargins(6, 4, 6, 4)
         neighbourhood.addRow("Perplexity", self.perplexity)
         neighbourhood.addRow("Metric", self.metric_box)
@@ -211,6 +225,7 @@ class TsnePanel(QWidget):
         neighbourhood_group.setLayout(neighbourhood)
 
         optimisation = QFormLayout()
+        optimisation.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         optimisation.setContentsMargins(6, 4, 6, 4)
         optimisation.addRow("Learning rate", self.learning_rate)
         optimisation.addRow("Early exagg.", self.early_exaggeration)
@@ -220,6 +235,7 @@ class TsnePanel(QWidget):
         optimisation_group.setLayout(optimisation)
 
         reproducibility = QFormLayout()
+        reproducibility.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         reproducibility.setContentsMargins(6, 4, 6, 4)
         reproducibility.addRow("Seed", seed_widget)
         reproducibility_group = QGroupBox("Reproducibility")

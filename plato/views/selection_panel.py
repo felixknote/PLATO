@@ -153,12 +153,12 @@ class SelectionEntry(QFrame):
 
         self.image = QLabel()
         self.image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image.setStyleSheet(f"background: {IMAGE_BACKGROUND}; border-radius: 2px;")
+        self.image.setObjectName("imageCanvas")
         self.image.setText("…")
 
         self.caption = QLabel(caption)
         self.caption.setWordWrap(True)
-        self.caption.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self.caption.setObjectName("mutedSmall")
         self.caption.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # Removing one point from a selection has to be possible without
@@ -253,7 +253,7 @@ class SelectionPanel(QWidget):
 
         self.count_label = QLabel("Click a point to select it")
         self.count_label.setWordWrap(True)
-        self.count_label.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 11px;")
+        self.count_label.setObjectName("hint")
 
         self.compare_button = QPushButton("Compare selected")
         self.compare_button.setToolTip(
@@ -305,7 +305,7 @@ class SelectionPanel(QWidget):
         )
         self.empty_label.setWordWrap(True)
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_label.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 11px;")
+        self.empty_label.setObjectName("hint")
 
         # -- metadata for the current entry
         self.metadata = QLabel("")
@@ -313,7 +313,7 @@ class SelectionPanel(QWidget):
         self.metadata.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        self.metadata.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px;")
+        self.metadata.setObjectName("mutedSmall")
         self.metadata.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
         )

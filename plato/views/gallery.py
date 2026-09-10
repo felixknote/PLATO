@@ -178,7 +178,7 @@ class SelectionGallery(QWidget):
 
         self.heading = QLabel("Lasso a region to see its images")
         self.heading.setWordWrap(True)
-        self.heading.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 11px;")
+        self.heading.setObjectName("hint")
 
         self.model = GalleryModel(self)
         self.view = QListView()

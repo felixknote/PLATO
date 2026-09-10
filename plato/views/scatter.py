@@ -174,6 +174,8 @@ class EmbeddingScatter(QWidget):
         self._highlight.hide()
 
         self.legend: pg.LegendItem | None = None
+        # Kept so a theme change can rebuild the legend without a full redraw.
+        self._legend_entries: list[tuple[str, str]] | None = None
 
         # -- lasso
         self.lasso_enabled = False
@@ -334,16 +336,38 @@ class EmbeddingScatter(QWidget):
         self._items.clear()
 
     def _set_legend(self, entries: list[tuple[str, str]] | None) -> None:
+        self._legend_entries = entries
         if self.legend is not None:
             self.legend.scene().removeItem(self.legend)
             self.legend = None
         if not entries:
             return
+        # The legend sits ON the plot, so it has to follow the plot's own
+        # background rather than the app theme: a dark legend on a white
+        # export is unreadable, and so is the reverse. A hard-coded dark
+        # panel here is what made the legend stay dark in light mode.
+        from ..gui import themes as _themes
+
+        light = self.background_mode == BACKGROUND_LIGHT or (
+            self.background_mode == BACKGROUND_THEME and not _themes.is_dark()
+        )
+        if self.background_mode == BACKGROUND_TRANSPARENT:
+            # Nothing behind it to sit on: a faint panel keeps the labels
+            # legible on whatever the figure's own ground turns out to be.
+            panel = QColor(128, 128, 128, 40)
+            ink = _themes.current().text
+        elif light:
+            panel = QColor(255, 255, 255, 220)
+            ink = "#20242b"
+        else:
+            panel = QColor(30, 33, 39, 220)
+            ink = _themes.current().text
+
         self.legend = pg.LegendItem(
             offset=(-14, 14),
-            labelTextColor=TEXT,
-            brush=pg.mkBrush(QColor(30, 33, 39, 220)),
-            pen=pg.mkPen(BORDER),
+            labelTextColor=ink,
+            brush=pg.mkBrush(panel),
+            pen=pg.mkPen(_themes.current().border),
             verSpacing=-4,
         )
         self.legend.setParentItem(self.plot.getPlotItem())
@@ -488,15 +512,36 @@ class EmbeddingScatter(QWidget):
         elif self.background_mode == BACKGROUND_DARK:
             colour = QColor(IMAGE_BACKGROUND)
         else:
-            colour = QColor(themes.current().image_background)
+            colour = QColor(themes.current().plot_background)
         self.plot.setBackground(colour)
 
         # Axis and label ink has to invert on a light ground or it vanishes.
-        light = self.background_mode == BACKGROUND_LIGHT
+        # "Follow app theme" counts as light when the theme is light.
+        light = self.background_mode == BACKGROUND_LIGHT or (
+            self.background_mode == BACKGROUND_THEME and not themes.is_dark()
+        )
         ink = "#20242b" if light else themes.current().text_muted
         for axis in ("bottom", "left"):
             self.plot.getAxis(axis).setPen(pg.mkPen(ink))
             self.plot.getAxis(axis).setTextPen(pg.mkPen(ink))
+
+    def restyle(self) -> None:
+        """Repaint for a new application theme.
+
+        Only matters while the background follows the theme; an explicitly
+        chosen dark, light or transparent ground is a deliberate decision that
+        a theme switch must not override.
+        """
+        self.set_background(self.background_mode)
+        # Rebuild the legend so its panel and ink follow the new theme.
+        if self.legend is not None and self._legend_entries:
+            self._set_legend(self._legend_entries)
+        from ..gui import themes as _themes
+
+        self._highlight.setPen(pg.mkPen(_themes.current().text, width=2))
+        self._lasso_curve.setPen(
+            pg.mkPen(_themes.current().text, width=1.5, style=Qt.PenStyle.DashLine)
+        )
 
     def background_colour(self) -> QColor:
         """The colour an export should fill with, alpha included."""
@@ -508,7 +553,7 @@ class EmbeddingScatter(QWidget):
             return QColor("#ffffff")
         if self.background_mode == BACKGROUND_DARK:
             return QColor(IMAGE_BACKGROUND)
-        return QColor(themes.current().image_background)
+        return QColor(themes.current().plot_background)
 
     def set_view_limits(self, x_min, x_max, y_min, y_max) -> None:
         """Pin the visible extent, so facets share one coordinate system."""

@@ -128,7 +128,7 @@ class PreviewPane(QWidget):
         self.metadata_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        self.metadata_label.setStyleSheet(f"color: {TEXT_MUTED};")
+        self.metadata_label.setObjectName("muted")
         self.metadata_label.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
         )

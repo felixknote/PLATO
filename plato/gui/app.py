@@ -31,5 +31,7 @@ def run(cfg: Config | None = None) -> int:
     if cfg is not None:
         session.add_plate(cfg)
     window = MainWindow(session)
-    window.show()
+    # No show() here: the window shows itself in _restore_geometry, either
+    # maximised or at its saved size. Calling show() after showMaximized()
+    # is what used to collapse it to the layout minimum.
     return app.exec()

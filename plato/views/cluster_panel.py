@@ -146,7 +146,7 @@ class FieldBlock(QFrame):
         )
 
         title = QLabel(f"<b>{summary.label}</b>")
-        title.setStyleSheet(f"color: {TEXT};")
+        title.setObjectName("body")
 
         # Divergence is the ranking, so it should be visible rather than an
         # invisible sort key the user has to take on trust.
@@ -157,7 +157,7 @@ class FieldBlock(QFrame):
             "0.00 = identical to the background; 1.00 = no overlap at all.\n"
             "Scaled by how much of the selection the field actually annotates."
         )
-        score.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 10px;")
+        score.setObjectName("hintSmall")
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -181,7 +181,7 @@ class FieldBlock(QFrame):
             notes.append(f"{summary.missing:,} unannotated")
         if notes:
             note = QLabel(" · ".join(notes))
-            note.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 10px;")
+            note.setObjectName("hintSmall")
             layout.addWidget(note)
         self.setLayout(layout)
 
@@ -215,11 +215,11 @@ class ClusterPanel(QWidget):
 
         self.headline = QLabel("")
         self.headline.setWordWrap(True)
-        self.headline.setStyleSheet(f"color: {TEXT}; font-size: 11px;")
+        self.headline.setObjectName("body")
 
         self.summary_label = QLabel("Draw a lasso to analyse a region.")
         self.summary_label.setWordWrap(True)
-        self.summary_label.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 11px;")
+        self.summary_label.setObjectName("hint")
 
         self.images_button = QPushButton("Show images")
         self.images_button.setToolTip(
@@ -335,7 +335,7 @@ class ClusterPanel(QWidget):
         if not fields:
             note = QLabel("No categorical metadata to break this selection down by.")
             note.setWordWrap(True)
-            note.setStyleSheet(f"color: {TEXT_FAINT}; font-size: 11px;")
+            note.setObjectName("hint")
             self.blocks_layout.addWidget(note)
             self._blocks = []
             return
