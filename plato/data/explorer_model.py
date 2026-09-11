@@ -144,28 +144,15 @@ class ImageResolver:
         Unlike :meth:`detect` this always returns a resolver, so a caller can
         explain *why* a folder did not work instead of only that it did not.
         """
-        return cls.for_roots([root], frame, samples=samples)
-
-    @classmethod
-    def for_roots(
-        cls, roots: list[Path], frame: pd.DataFrame, *, samples: int = 24
-    ) -> ImageResolver:
-        """Index several roots as one lookup and report how well it matches.
-
-        Some exports split their images across more than one folder -- one
-        per experiment arm, say -- where no single folder resolves every row.
-        Indexing them together means a row resolves as long as its image is
-        under ANY of ``roots``, not just the first one tried.
-        """
-        roots = [Path(r) for r in roots]
+        root = Path(root)
         if frame is None or frame.empty or IMAGE_NAME not in frame.columns:
-            return cls(root=roots[0], index=ImageIndex(root=roots[0], roots=roots))
-        index = ImageIndex.build_many(roots)
+            return cls(root=root, index=ImageIndex(root=root))
+        index = ImageIndex.build(root)
         hints = hint_columns(frame, exclude=(IMAGE_NAME,))
         report = probe(
             index, frame, name_column=IMAGE_NAME, hints=hints, samples=samples
         )
-        return cls(root=roots[0], index=index, hints=hints, report=report)
+        return cls(root=root, index=index, hints=hints, report=report)
 
     def combined_with(self, other: ImageResolver, frame: pd.DataFrame, *, samples: int = 24) -> ImageResolver:
         """A resolver covering this one's roots plus ``other``'s roots.

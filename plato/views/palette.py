@@ -24,48 +24,17 @@ import re
 from PySide6.QtGui import QColor
 
 from ..data.annotations import UNANNOTATED
+from . import palettes
 
-# Qualitative palette. Ordered so that adjacent entries are distinguishable
-# even for the most common forms of colour vision deficiency -- consecutive
-# hues never differ by red/green alone.
-CATEGORICAL = (
-    "#4a90d9",  # blue
-    "#e8a33d",  # amber
-    "#4fc3a1",  # teal
-    "#e2647a",  # rose
-    "#a98bdc",  # violet
-    "#8fc866",  # green
-    "#e07b53",  # orange
-    "#5bc0d4",  # cyan
-    "#d98cc4",  # pink
-    "#c2b34a",  # olive
-    "#7f9cd4",  # slate blue
-    "#d4735a",  # terracotta
-    "#6cc39a",  # jade
-    "#c98fb0",  # mauve
-    "#9ab84f",  # lime
-    "#6fb3c9",  # steel
-    "#d9a05b",  # sand
-    "#8d9ee0",  # periwinkle
-    "#b5cc5e",  # chartreuse
-    "#df8f8f",  # salmon
-)
+# The app's own qualitative and sequential scales -- the registry in
+# palettes.py is the one source of truth for the actual colour values, this
+# module only decides which registered palette is currently active.
+CATEGORICAL = palettes.get("plato").colours
+CONTINUOUS = palettes.get("plato_seq").colours
 
 # Anything unannotated or empty is grey and sits visually behind the real
 # categories -- present, countable, but never mistaken for a finding.
 UNKNOWN_COLOUR = "#5a616e"
-
-# Continuous ramp, dark blue -> cyan -> yellow. Monotonic in lightness so it
-# still orders correctly when read as greyscale.
-CONTINUOUS = (
-    "#3b4cc0",
-    "#4a7dd4",
-    "#5ba7d4",
-    "#6fc7bc",
-    "#9dd693",
-    "#d4d06a",
-    "#e8a33d",
-)
 
 _UNKNOWN_KEYS = {"", UNANNOTATED, "none", "nan", "unknown", "n/a"}
 
@@ -160,7 +129,6 @@ def set_active_palette(key: str) -> None:
     place they all read. See plato.views.palettes for the registry.
     """
     global _ACTIVE_CATEGORICAL, _ACTIVE_CONTINUOUS
-    from . import palettes
 
     palette = palettes.get(key)
     if palette.kind == palettes.CATEGORICAL:

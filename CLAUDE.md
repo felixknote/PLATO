@@ -63,7 +63,7 @@ plato/
 | `compare_view.py` | `ComparisonView`/`ComparisonColumn`, shared locked `Viewport` |
 | `palette.py` | value -> colour/shape assignment, stable across filters |
 | `palettes.py` | the palette registry: every named categorical/sequential/diverging scale |
-| `browser.py`, `model.py`, `gallery.py`, `preview.py` | browser arm + shared decode |
+| `browser.py`, `model.py`, `preview.py` | browser arm + shared decode |
 
 ## Invariants — break these and things go subtly wrong
 

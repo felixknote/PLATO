@@ -16,8 +16,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-ORGANISATION = "plato"
-APPLICATION = "plato"
+from ..data.locations import APPLICATION, ORGANISATION
+
 DEFAULT_NM_PER_PIXEL = 108.0
 # Bar length as a fraction of the image's width, so it scales with field of
 # view / magnification instead of being pinned to one physical length.

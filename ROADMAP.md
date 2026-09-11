@@ -81,8 +81,6 @@ docstring for the exact numbers found at each grid point.
 
 * The logo's outer arcs: 4 strands above and below the plate where the
   reference has 2.
-* `views/gallery.py` is now unreferenced since the selection panel replaced
-  the strip under the plot.
 * Light theme has not been checked widget by widget; the mechanism works and
   most labels now take their colour from the global stylesheet, but anything
   still baking colours at import will stay dark until rebuilt.

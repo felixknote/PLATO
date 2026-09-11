@@ -98,17 +98,17 @@ def _walk_into(
 
 @dataclass
 class ImageIndex:
-    """Every image file under one or more roots, keyed by file name stem.
+    """Every image file under a root, keyed by file name stem.
 
-    Built once per root (or set of roots) and reused: the scan is the
-    expensive part on a network share, and the answer does not change while
-    the app is open.
+    Built once per root and reused: the scan is the expensive part on a
+    network share, and the answer does not change while the app is open.
 
     Some exports split their images across more than one folder -- an
     experiment arm per folder, a plate per drive, an incremental delivery
     kept separate from the original -- so a single dataset's images need not
-    live under one root. ``roots`` lists every folder actually scanned;
-    ``root`` stays the first of them, for callers that only show one path.
+    live under one root. ``merged_with`` combines two indexes built this way
+    into one; ``roots`` then lists every folder actually scanned, ``root``
+    staying the first of them for callers that only show one path.
     """
 
     root: Path
@@ -126,24 +126,10 @@ class ImageIndex:
 
     @classmethod
     def build(cls, root: Path, *, max_files: int = MAX_FILES) -> ImageIndex:
-        return cls.build_many([root], max_files=max_files)
-
-    @classmethod
-    def build_many(cls, roots: list[Path], *, max_files: int = MAX_FILES) -> ImageIndex:
-        """Index several roots into one lookup, as if their files were one folder.
-
-        A file name is matched wherever it is found, so it does not matter
-        which of the roots actually holds a given row's image.
-        """
-        roots = [Path(r) for r in roots]
+        root = Path(root)
         by_stem: dict[str, list[Path]] = defaultdict(list)
-        seen = 0
-        truncated = False
-        for root in roots:
-            seen, truncated = _walk_into(root, by_stem, seen=seen, max_files=max_files)
-            if truncated:
-                break
-        return cls(root=roots[0], by_stem=dict(by_stem), truncated=truncated, roots=roots)
+        seen, truncated = _walk_into(root, by_stem, seen=0, max_files=max_files)
+        return cls(root=root, by_stem=dict(by_stem), truncated=truncated)
 
     def merged_with(self, other: ImageIndex) -> ImageIndex:
         """A new index covering this one's roots plus ``other``'s.
