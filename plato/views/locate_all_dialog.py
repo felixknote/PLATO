@@ -40,23 +40,41 @@ MAX_SUGGESTIONS = 8
 
 
 class _ScanSignals(QObject):
-    done = Signal(str, object)  # entry key, ImageResolver
+    done = Signal(str, object, bool)  # entry key, ImageResolver, is_addition
     failed = Signal(str, str)  # entry key, message
 
 
 class _ScanTask(QRunnable):
-    """Indexes one candidate folder against one entry's frame, off the GUI thread."""
+    """Indexes one candidate folder against one entry's frame, off the GUI thread.
 
-    def __init__(self, key: str, root: Path, frame, signals: _ScanSignals) -> None:
+    ``base`` is None for a fresh "Choose folder…" scan, which replaces
+    whatever the row already had. When it is set (from "Add another
+    folder…"), the newly-scanned root is merged into it instead -- some
+    exports split their images across more than one folder, and a second
+    folder should add matches rather than throw away the first one's.
+    """
+
+    def __init__(
+        self,
+        key: str,
+        root: Path,
+        frame,
+        signals: _ScanSignals,
+        *,
+        base: ImageResolver | None = None,
+    ) -> None:
         super().__init__()
         self._key = key
         self._root = root
         self._frame = frame
         self._signals = signals
+        self._base = base
 
     def run(self) -> None:  # pragma: no cover - worker thread
         try:
             resolver = ImageResolver.for_root(self._root, self._frame)
+            if self._base is not None:
+                resolver = self._base.combined_with(resolver, self._frame)
         except Exception as exc:  # noqa: BLE001 - reported in the dialog
             try:
                 self._signals.failed.emit(self._key, str(exc))
@@ -64,7 +82,7 @@ class _ScanTask(QRunnable):
                 pass
             return
         try:
-            self._signals.done.emit(self._key, resolver)
+            self._signals.done.emit(self._key, resolver, self._base is not None)
         except RuntimeError:
             pass
 
@@ -73,6 +91,7 @@ class _EntryRow(QWidget):
     """One embedding: its name, current status, and a Choose folder button."""
 
     choose_requested = Signal(str)  # entry key
+    add_folder_requested = Signal(str)  # entry key
     suggestion_clicked = Signal(str, str)  # entry key, path
 
     def __init__(self, entry: EmbeddingEntry, parent: QWidget | None = None) -> None:
@@ -94,6 +113,21 @@ class _EntryRow(QWidget):
         self.choose_button = QPushButton("Choose folder…")
         self.choose_button.clicked.connect(lambda: self.choose_requested.emit(self.key))
 
+        # Only useful once a folder has been chosen -- there is nothing to
+        # add a folder TO otherwise. Some exports genuinely split their
+        # images across more than one folder (an arm per folder, a plate per
+        # drive), which is why this merges rather than replacing.
+        self.add_folder_button = QPushButton("Add another folder…")
+        self.add_folder_button.setToolTip(
+            "If this dataset's images are split across more than one folder, "
+            "add the others here -- rows resolve as long as their image is "
+            "under any of the folders added."
+        )
+        self.add_folder_button.clicked.connect(
+            lambda: self.add_folder_requested.emit(self.key)
+        )
+        self.add_folder_button.setVisible(self.pending_resolver is not None)
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.setTextVisible(False)
@@ -112,6 +146,7 @@ class _EntryRow(QWidget):
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.addWidget(self.name_label, 1)
+        top.addWidget(self.add_folder_button)
         top.addWidget(self.choose_button)
 
         layout = QVBoxLayout()
@@ -132,13 +167,20 @@ class _EntryRow(QWidget):
             f"border: 1px solid {border}; border-radius: 4px; }}"
         )
 
+    @staticmethod
+    def _roots_label(resolver: ImageResolver) -> str:
+        roots = resolver.roots
+        if len(roots) <= 1:
+            return str(resolver.root)
+        return " + ".join(str(r) for r in roots)
+
     def _initial_status(self) -> str:
         if self.entry.resolver is not None and self.entry.resolver.report is not None:
             report = self.entry.resolver.report
             percent = report.fraction * 100
             mark = "✓" if report.ok else "⚠"
             return (
-                f"{mark} {self.entry.resolver.root}\n"
+                f"{mark} {self._roots_label(self.entry.resolver)}\n"
                 f"{report.n_files:,} images, {percent:.0f}% of sampled rows resolved"
             )
         return "Not located yet."
@@ -150,38 +192,46 @@ class _EntryRow(QWidget):
         self.progress.show()
         self.suggestions.hide()
         self.choose_button.setEnabled(False)
+        self.add_folder_button.setEnabled(False)
 
-    def set_result(self, resolver: ImageResolver) -> None:
+    def set_result(self, resolver: ImageResolver, is_addition: bool = False) -> None:
         self.progress.hide()
         self.choose_button.setEnabled(True)
         report = resolver.report
         if report is None:
             self.status_label.setText("Nothing to check against.")
+            self.add_folder_button.setEnabled(self.pending_resolver is not None)
             return
 
+        label = self._roots_label(resolver)
         if report.ok:
             self.pending_resolver = resolver
+            self.add_folder_button.setVisible(True)
+            self.add_folder_button.setEnabled(True)
             percent = report.fraction * 100
+            now = "now " if is_addition else ""
             if report.fraction >= 0.95:
                 self.status_label.setText(
-                    f"✓ {resolver.root}\n{report.n_files:,} images found, "
-                    f"every sampled row resolved."
+                    f"✓ {label}\n{report.n_files:,} images found, "
+                    f"every sampled row {now}resolved."
                 )
             else:
                 self.status_label.setText(
-                    f"⚠ {resolver.root}\n{report.n_files:,} images found, but "
-                    f"only {percent:.0f}% of sampled rows resolved. This folder "
-                    f"probably holds part of the dataset."
+                    f"⚠ {label}\n{report.n_files:,} images found, but "
+                    f"only {percent:.0f}% of sampled rows {now}resolved. "
+                    "Add another folder if the rest live elsewhere."
                 )
             self._offer_neighbours(resolver.root)
             return
 
-        self.status_label.setText(f"✗ {resolver.root}\n{report.describe()}.")
+        self.add_folder_button.setEnabled(self.pending_resolver is not None)
+        self.status_label.setText(f"✗ {label}\n{report.describe()}.")
         self._offer_neighbours(resolver.root)
 
     def set_failed(self, message: str) -> None:
         self.progress.hide()
         self.choose_button.setEnabled(True)
+        self.add_folder_button.setEnabled(self.pending_resolver is not None)
         self.status_label.setText(f"Could not read that folder:\n{message}")
 
     def _offer_neighbours(self, root: Path) -> None:
@@ -226,7 +276,9 @@ class LocateAllDialog(_QDialog):
         intro = QLabel(
             "Choose the folder holding the raw microscopy images for each "
             "embedding below. Any arrangement works — one folder per plate, "
-            "arms in subfolders, or everything together."
+            "arms in subfolders, or everything together. If a dataset's "
+            "images are split across more than one folder, use “Add another "
+            "folder…” to add each one in turn."
         )
         intro.setWordWrap(True)
         intro.setObjectName("muted")
@@ -236,6 +288,7 @@ class LocateAllDialog(_QDialog):
         for entry in entries:
             row = _EntryRow(entry)
             row.choose_requested.connect(self._choose_for)
+            row.add_folder_requested.connect(self._add_folder_for)
             row.suggestion_clicked.connect(self._scan)
             self._rows[entry.key] = row
             rows_layout.addWidget(row)
@@ -277,18 +330,36 @@ class LocateAllDialog(_QDialog):
         if chosen:
             self._scan(key, chosen)
 
-    def _scan(self, key: str, root: str) -> None:
+    def _add_folder_for(self, key: str) -> None:
+        """Scan a second (or third...) folder and merge it into what the row has.
+
+        Distinct from "Choose folder…", which replaces -- this is for a
+        dataset whose images are genuinely split across more than one
+        folder, where the existing matches must be kept, not thrown away.
+        """
+        row = self._rows.get(key)
+        if row is None or row.pending_resolver is None:
+            return
+        already = {str(r) for r in row.pending_resolver.roots}
+        chosen = QFileDialog.getExistingDirectory(self, "Add another image folder", "")
+        if not chosen:
+            return
+        if str(Path(chosen)) in already:
+            return
+        self._scan(key, chosen, base=row.pending_resolver)
+
+    def _scan(self, key: str, root: str, *, base: ImageResolver | None = None) -> None:
         row = self._rows.get(key)
         if row is None:
             return
         path = Path(root)
         row.set_scanning(path)
-        self._pool.start(_ScanTask(key, path, row.entry.frame, self._signals))
+        self._pool.start(_ScanTask(key, path, row.entry.frame, self._signals, base=base))
 
-    def _on_scanned(self, key: str, resolver: ImageResolver) -> None:
+    def _on_scanned(self, key: str, resolver: ImageResolver, is_addition: bool) -> None:
         row = self._rows.get(key)
         if row is not None:
-            row.set_result(resolver)
+            row.set_result(resolver, is_addition)
 
     def _on_failed(self, key: str, message: str) -> None:
         row = self._rows.get(key)

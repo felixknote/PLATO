@@ -370,6 +370,7 @@ class _CountingResolver:
         from pathlib import Path
 
         self.root = Path("/fake")
+        self.roots = [self.root]
 
     def path_for(self, record):
         from pathlib import Path

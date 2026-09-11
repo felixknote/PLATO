@@ -122,3 +122,13 @@ widgets re-read their colours.
   are currently visible after a filter — deriving it from the filtered
   subset reassigns other categories' colours the moment one category is
   filtered out, since assignment is by positional index into the palette.
+- `QWidget.isVisible()` reflects the WHOLE ancestor chain being shown, so a
+  widget built for a test and never added to a shown window reads `False`
+  regardless of its own `setVisible(True)` — check `isVisibleTo(parent)`
+  instead when testing a widget that is never actually put on screen.
+- Connecting a second listener onto a signal a dialog already wired to its
+  own handler (e.g. a `_EntryRow`'s `add_folder_requested`, which
+  `LocateAllDialog` connects to `_add_folder_for`) fires BOTH on emit — if
+  the dialog's own handler opens a real `QFileDialog`, that blocks
+  headlessly with no visible error. Test such a row's own signal wiring on a
+  bare instance, not one already owned by the dialog.

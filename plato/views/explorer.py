@@ -1193,9 +1193,18 @@ class EmbeddingExplorer(QWidget):
             self.source_label.setToolTip("")
             return
 
+        roots = self.resolver.roots
         root = str(self.resolver.root)
-        # Keep the tail, which is the part that identifies the screen.
-        shown = root if len(root) <= 34 else "…" + root[-33:]
+        if len(roots) > 1:
+            # Images live under more than one folder for this dataset -- say
+            # so, rather than naming only the first and implying it is the
+            # whole story.
+            shown = f"{len(roots)} folders"
+            tooltip_root = "\n    ".join(str(r) for r in roots)
+        else:
+            # Keep the tail, which is the part that identifies the screen.
+            shown = root if len(root) <= 34 else "…" + root[-33:]
+            tooltip_root = root
 
         if self.ambiguous_roots:
             # Several screens matched. Naming one as if it were certain is how
@@ -1203,7 +1212,7 @@ class EmbeddingExplorer(QWidget):
             self.source_label.setText(f"{shown}\n(guessed — other folders also match)")
             self.source_label.setToolTip(
                 "Using:\n"
-                f"    {root}\n\n"
+                f"    {tooltip_root}\n\n"
                 "These also matched, because screens share a filename "
                 "convention:\n    "
                 + "\n    ".join(self.ambiguous_roots)
@@ -1211,7 +1220,7 @@ class EmbeddingExplorer(QWidget):
             )
         else:
             self.source_label.setText(shown)
-            self.source_label.setToolTip(root)
+            self.source_label.setToolTip(tooltip_root)
 
     def _on_dataset_changed(self) -> None:
         directory = self.dataset_box.currentData()

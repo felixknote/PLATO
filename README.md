@@ -371,6 +371,12 @@ uses, stepping through the currently filtered selection. Rows are matched to
 files through the metadata columns, never through row position — the export's
 row order is an artefact of the extractor's directory walk. Set
 `PLATO_IMAGE_ROOT` if your images are not where a loaded plate points.
+Some exports split their images across more than one folder (an experiment
+arm per folder, a plate per drive) where no single folder holds every row;
+**Locate source data…** covers this with **Add another folder…**, which
+merges a second folder's images into what the first one already resolved
+instead of replacing it, so a row's image is found as long as it is under
+any of the folders added.
 
 **Export.** PNG and SVG, from whichever view is actually on screen — the
 single plot or the faceted grid, legend included either way. The single-plot

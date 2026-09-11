@@ -429,6 +429,75 @@ def test_resolver_refuses_a_coincidental_name_match(tmp_path):
     assert resolver.report is not None and not resolver.report.ok
 
 
+def test_for_roots_resolves_a_dataset_split_across_two_folders(tmp_path):
+    """Some exports genuinely have no single folder holding every image.
+
+    Aug26 CRISPRi & ABx stores CRISPRi and ABx images under two separate
+    subfolders -- indexing both together must resolve rows from either half,
+    not just whichever folder happens to be tried first.
+    """
+    dataset = load_dataset(_write_dataset(tmp_path / "ds"))
+    frame, _ = build_frame(dataset)
+    plates = sorted(set(frame["plate"]))
+    half = len(plates) // 2
+    folder_a = tmp_path / "CRISPRi"
+    folder_b = tmp_path / "ABx"
+    for plate in plates[:half]:
+        rows = frame[frame["plate"] == plate]
+        (folder_a / plate).mkdir(parents=True)
+        for _, row in rows.iterrows():
+            (folder_a / plate / f"{row['image_name']}.tiff").write_bytes(b"x")
+    for plate in plates[half:]:
+        rows = frame[frame["plate"] == plate]
+        (folder_b / plate).mkdir(parents=True)
+        for _, row in rows.iterrows():
+            (folder_b / plate / f"{row['image_name']}.tiff").write_bytes(b"x")
+
+    # Neither folder alone resolves everything.
+    only_a = ImageResolver.for_root(folder_a, frame)
+    only_b = ImageResolver.for_root(folder_b, frame)
+    assert only_a.report.fraction < 1.0
+    assert only_b.report.fraction < 1.0
+
+    combined = ImageResolver.for_roots([folder_a, folder_b], frame)
+    assert combined.report.fraction == pytest.approx(1.0)
+    assert combined.roots == [folder_a, folder_b]
+    for _, row in frame.iterrows():
+        assert combined.path_for(row) is not None
+
+
+def test_combined_with_merges_without_losing_the_first_folders_matches(tmp_path):
+    """Adding a second folder must add matches, not replace the first folder's."""
+    dataset = load_dataset(_write_dataset(tmp_path / "ds"))
+    frame, _ = build_frame(dataset)
+    plates = sorted(set(frame["plate"]))
+    half = len(plates) // 2
+    folder_a = tmp_path / "first"
+    folder_b = tmp_path / "second"
+    for plate in plates[:half]:
+        rows = frame[frame["plate"] == plate]
+        (folder_a / plate).mkdir(parents=True)
+        for _, row in rows.iterrows():
+            (folder_a / plate / f"{row['image_name']}.tiff").write_bytes(b"x")
+    for plate in plates[half:]:
+        rows = frame[frame["plate"] == plate]
+        (folder_b / plate).mkdir(parents=True)
+        for _, row in rows.iterrows():
+            (folder_b / plate / f"{row['image_name']}.tiff").write_bytes(b"x")
+
+    first = ImageResolver.for_root(folder_a, frame)
+    second = ImageResolver.for_root(folder_b, frame)
+    combined = first.combined_with(second, frame)
+
+    assert combined.report.fraction == pytest.approx(1.0)
+    assert set(combined.roots) == {folder_a, folder_b}
+    # Rows that "first" alone already resolved must still resolve.
+    for _, row in frame[frame["plate"].isin(plates[:half])].iterrows():
+        assert combined.path_for(row) is not None
+    for _, row in frame[frame["plate"].isin(plates[half:])].iterrows():
+        assert combined.path_for(row) is not None
+
+
 # -- projection -------------------------------------------------------------
 
 

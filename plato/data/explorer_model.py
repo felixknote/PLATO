@@ -122,6 +122,11 @@ class ImageResolver:
     hints: list[str] = field(default_factory=list)
     report: LookupReport | None = None
 
+    @property
+    def roots(self) -> list[Path]:
+        """Every folder this resolver actually scanned, primary first."""
+        return self.index.roots
+
     @classmethod
     def detect(
         cls, root: Path, frame: pd.DataFrame, *, samples: int = 24
@@ -139,15 +144,46 @@ class ImageResolver:
         Unlike :meth:`detect` this always returns a resolver, so a caller can
         explain *why* a folder did not work instead of only that it did not.
         """
-        root = Path(root)
+        return cls.for_roots([root], frame, samples=samples)
+
+    @classmethod
+    def for_roots(
+        cls, roots: list[Path], frame: pd.DataFrame, *, samples: int = 24
+    ) -> ImageResolver:
+        """Index several roots as one lookup and report how well it matches.
+
+        Some exports split their images across more than one folder -- one
+        per experiment arm, say -- where no single folder resolves every row.
+        Indexing them together means a row resolves as long as its image is
+        under ANY of ``roots``, not just the first one tried.
+        """
+        roots = [Path(r) for r in roots]
         if frame is None or frame.empty or IMAGE_NAME not in frame.columns:
-            return cls(root=root, index=ImageIndex(root=root))
-        index = ImageIndex.build(root)
+            return cls(root=roots[0], index=ImageIndex(root=roots[0], roots=roots))
+        index = ImageIndex.build_many(roots)
         hints = hint_columns(frame, exclude=(IMAGE_NAME,))
         report = probe(
             index, frame, name_column=IMAGE_NAME, hints=hints, samples=samples
         )
-        return cls(root=root, index=index, hints=hints, report=report)
+        return cls(root=roots[0], index=index, hints=hints, report=report)
+
+    def combined_with(self, other: ImageResolver, frame: pd.DataFrame, *, samples: int = 24) -> ImageResolver:
+        """A resolver covering this one's roots plus ``other``'s roots.
+
+        Used when one folder only holds part of a dataset's images (an arm,
+        a plate, an incremental delivery) -- adding a second folder should
+        resolve more rows, not replace the first folder's matches.
+        """
+        index = self.index.merged_with(other.index)
+        hints = hint_columns(frame, exclude=(IMAGE_NAME,)) if frame is not None else self.hints
+        report = (
+            probe(index, frame, name_column=self.name_column, hints=hints, samples=samples)
+            if frame is not None and not frame.empty
+            else self.report
+        )
+        return ImageResolver(
+            root=self.root, index=index, name_column=self.name_column, hints=hints, report=report
+        )
 
     def path_for(self, row) -> Path | None:
         """The image for one row, or None if it is not under this root."""

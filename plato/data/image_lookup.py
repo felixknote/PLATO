@@ -73,17 +73,52 @@ def _tokens(value: str) -> list[str]:
     return [t for t in re.split(r"[^A-Za-z0-9]+", str(value).lower()) if t]
 
 
+def _walk_into(
+    root: Path, by_stem: dict[str, list[Path]], *, seen: int, max_files: int
+) -> tuple[int, bool]:
+    """Add every image file under ``root`` to ``by_stem``. Returns (seen, truncated)."""
+    root_depth = len(root.parts)
+    for current, directories, files in os.walk(root):
+        here = Path(current)
+        if len(here.parts) - root_depth >= MAX_DEPTH:
+            directories[:] = []
+        directories[:] = [
+            d for d in directories if d not in SKIP_DIRECTORIES and not d.startswith(".")
+        ]
+        for name in files:
+            stem, suffix = os.path.splitext(name)
+            if suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            by_stem[stem].append(here / name)
+            seen += 1
+            if seen >= max_files:
+                return seen, True
+    return seen, False
+
+
 @dataclass
 class ImageIndex:
-    """Every image file under a root, keyed by file name stem.
+    """Every image file under one or more roots, keyed by file name stem.
 
-    Built once per root and reused: the scan is the expensive part on a
-    network share, and the answer does not change while the app is open.
+    Built once per root (or set of roots) and reused: the scan is the
+    expensive part on a network share, and the answer does not change while
+    the app is open.
+
+    Some exports split their images across more than one folder -- an
+    experiment arm per folder, a plate per drive, an incremental delivery
+    kept separate from the original -- so a single dataset's images need not
+    live under one root. ``roots`` lists every folder actually scanned;
+    ``root`` stays the first of them, for callers that only show one path.
     """
 
     root: Path
     by_stem: dict[str, list[Path]] = field(default_factory=dict)
     truncated: bool = False
+    roots: list[Path] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.roots:
+            self.roots = [self.root]
 
     @property
     def n_files(self) -> int:
@@ -91,32 +126,45 @@ class ImageIndex:
 
     @classmethod
     def build(cls, root: Path, *, max_files: int = MAX_FILES) -> ImageIndex:
-        root = Path(root)
+        return cls.build_many([root], max_files=max_files)
+
+    @classmethod
+    def build_many(cls, roots: list[Path], *, max_files: int = MAX_FILES) -> ImageIndex:
+        """Index several roots into one lookup, as if their files were one folder.
+
+        A file name is matched wherever it is found, so it does not matter
+        which of the roots actually holds a given row's image.
+        """
+        roots = [Path(r) for r in roots]
         by_stem: dict[str, list[Path]] = defaultdict(list)
         seen = 0
         truncated = False
-
-        root_depth = len(root.parts)
-        for current, directories, files in os.walk(root):
-            here = Path(current)
-            if len(here.parts) - root_depth >= MAX_DEPTH:
-                directories[:] = []
-            directories[:] = [
-                d for d in directories if d not in SKIP_DIRECTORIES and not d.startswith(".")
-            ]
-            for name in files:
-                stem, suffix = os.path.splitext(name)
-                if suffix.lower() not in IMAGE_SUFFIXES:
-                    continue
-                by_stem[stem].append(here / name)
-                seen += 1
-                if seen >= max_files:
-                    truncated = True
-                    break
+        for root in roots:
+            seen, truncated = _walk_into(root, by_stem, seen=seen, max_files=max_files)
             if truncated:
                 break
+        return cls(root=roots[0], by_stem=dict(by_stem), truncated=truncated, roots=roots)
 
-        return cls(root=root, by_stem=dict(by_stem), truncated=truncated)
+    def merged_with(self, other: ImageIndex) -> ImageIndex:
+        """A new index covering this one's roots plus ``other``'s.
+
+        Files are re-unioned by stem rather than concatenating lists blindly,
+        so a name present under both (the same file copied, or a genuine
+        clash) still ends up de-duplicated by path.
+        """
+        by_stem: dict[str, list[Path]] = defaultdict(list, {k: list(v) for k, v in self.by_stem.items()})
+        for stem, paths in other.by_stem.items():
+            existing = by_stem[stem]
+            for path in paths:
+                if path not in existing:
+                    existing.append(path)
+        roots = self.roots + [r for r in other.roots if r not in self.roots]
+        return ImageIndex(
+            root=self.root,
+            by_stem=dict(by_stem),
+            truncated=self.truncated or other.truncated,
+            roots=roots,
+        )
 
     # -- lookup -----------------------------------------------------------
 

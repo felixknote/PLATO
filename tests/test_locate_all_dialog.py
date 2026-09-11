@@ -42,6 +42,11 @@ class _FakeReport:
 class _FakeResolver:
     root: Path
     report: _FakeReport
+    roots: list = None
+
+    def __post_init__(self):
+        if self.roots is None:
+            self.roots = [self.root]
 
 
 def _entry(name: str, n: int = 5) -> EmbeddingEntry:
@@ -143,3 +148,74 @@ def test_cancelling_the_dialog_leaves_entries_untouched(app):
     # the entry -- that only happens in explorer._browse_for_source_data
     # after the dialog is accepted.
     assert entry.resolver is None
+
+
+# -- images split across more than one folder --------------------------------
+
+
+def test_add_folder_button_hidden_until_a_folder_is_chosen(app):
+    # isVisible() reflects the whole ancestor chain, which is always False
+    # for a row that is never actually shown on screen; isVisibleTo(row)
+    # checks the widget's own flag relative to its parent instead.
+    row = _EntryRow(_entry("A"))
+    assert not row.add_folder_button.isVisibleTo(row)
+
+    row.set_result(
+        _FakeResolver(root=Path(r"X:\rootA"), report=_FakeReport(n_files=1, ok=True))
+    )
+    assert row.add_folder_button.isVisibleTo(row)
+
+
+def test_add_folder_requested_carries_the_row_key(app):
+    """A standalone row, NOT one built by LocateAllDialog: the dialog already
+    connects every row's add_folder_requested to its own _add_folder_for,
+    which opens a real (blocking) QFileDialog -- adding a second listener
+    onto a dialog-owned row fires that real dialog too and hangs headlessly.
+    A bare _EntryRow has no such connection, so this checks the row's own
+    wiring in isolation instead.
+    """
+    row = _EntryRow(_entry("A"))
+    row.set_result(
+        _FakeResolver(root=Path(r"X:\rootA"), report=_FakeReport(n_files=1, ok=True))
+    )
+
+    seen = []
+    row.add_folder_requested.connect(seen.append)
+    row.add_folder_button.clicked.emit()
+    assert seen == [row.key]
+
+
+def test_scan_with_a_base_resolver_passes_it_through_to_the_task(app):
+    """"Add another folder..." must merge, so _scan's base must reach the task.
+
+    The merge logic itself (ImageResolver.combined_with) has direct coverage
+    in test_explorer.py; this only checks the dialog wires the base resolver
+    through to _ScanTask rather than silently discarding it and scanning the
+    new folder as a plain replacement.
+    """
+    import plato.views.locate_all_dialog as mod
+
+    entry = _entry("A")
+    dialog = LocateAllDialog([entry])
+    base = _FakeResolver(root=Path(r"X:\first"), report=_FakeReport(n_files=1, ok=True))
+
+    captured = {}
+
+    class _RecordingTask:
+        def __init__(self, key, root, frame, signals, *, base=None):
+            captured["root"] = root
+            captured["base"] = base
+
+        def run(self):
+            pass
+
+    original = mod._ScanTask
+    mod._ScanTask = _RecordingTask
+    dialog._pool = type("P", (), {"start": staticmethod(lambda task: task.run())})()
+    try:
+        dialog._scan(entry.key, r"X:\second", base=base)
+    finally:
+        mod._ScanTask = original
+
+    assert captured["base"] is base
+    assert captured["root"] == Path(r"X:\second")
