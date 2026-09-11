@@ -44,6 +44,7 @@ plato/
 | `projection.py` | UMAP/t-SNE, `ProjectionParams`, disk cache keyed by params |
 | `annotations.py` | condition-string parsing, MoA/pathway tables, control labels |
 | `cluster_stats.py` | lasso composition: rank fields by divergence from background |
+| `plate_location.py` | row / column / distance-from-edge derived from `well` |
 | `image_stats.py` | raw per-image statistics (brightness/contrast/focus), opt-in |
 | `image_features.py` | 31 descriptors used **as** an embedding when no export exists |
 | `locations.py` | configured roots (env var → QSettings). **No hard-coded paths.** |
@@ -62,6 +63,7 @@ plato/
 | `stats_panel.py` / `stats_worker.py` | opt-in image statistics + its progress |
 | `compare_view.py` | `ComparisonView`/`ComparisonColumn`, shared locked `Viewport` |
 | `section.py` | `Accordion`/`Section`: the sidebar's one-open-at-a-time column |
+| `headline.py` | the title block composed above an exported plot |
 | `palette.py` | value -> colour/shape assignment, stable across filters |
 | `palettes.py` | the palette registry: every named categorical/sequential/diverging scale |
 | `browser.py`, `model.py`, `preview.py` | browser arm + shared decode |
@@ -123,6 +125,18 @@ widgets re-read their colours.
 - After L2-normalising, cosine and Euclidean give identical neighbours —
   ask for Euclidean, it has a fast path (measured 2.5× faster, ARI 1.000).
 - `QSettings` defaults only apply when nothing was saved before.
+- Every `_rebuild_*_options` blocks signals while repopulating its combo --
+  it must, or `clear()` fires `currentIndexChanged` once per removed item.
+  But that also swallows the REAL change: when the previously selected
+  column is absent from the new dataset, the box lands on a different one
+  and nothing repaints, so the plot keeps the old encoding while the box
+  names the new one. Every such rebuild must compare before/after and
+  redraw when they differ. (This was the "colour-by dropdown does not
+  react" bug; all four combos had it.)
+- Constructing a `QFont`/`QFontMetrics` without a `QApplication` **aborts
+  the process** rather than raising -- a pytest run just stops mid-file with
+  no traceback and no failure count. Any test touching font metrics needs
+  the `app` fixture.
 - `QWidget.grab()` on a window that was just shown renders STALE geometry --
   observed painting a collapsed accordion section at its old expanded height,
   and clipping widgets that measured correctly. Verify layout by reading

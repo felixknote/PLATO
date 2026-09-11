@@ -177,6 +177,52 @@ def _suggested_export_name(
     return "_".join(parts) + f".{fmt}"
 
 
+def export_headline(
+    *,
+    dataset: str | None,
+    method: str,
+    column: str | None,
+    group_column: str | None,
+    shown: int,
+    total: int,
+) -> tuple[str, str]:
+    """The two lines drawn above an exported plot: ``(title, subtitle)``.
+
+    An exported file leaves the app carrying nothing. On screen the dataset,
+    method and encoding are all readable from the sidebar; in a thesis figure
+    or a message to a collaborator, a bare scatter of coloured dots is
+    unidentifiable, and the filename that did encode those facts is gone the
+    moment the file is renamed or placed in a document.
+
+    The subtitle states what the colours mean and how many points are drawn.
+    ``shown``/``total`` matters because a subsampled projection is the norm
+    here, not the exception: a UMAP of 5,000 of 32,256 points is a different
+    claim from one of all of them, and nothing else in the image says which
+    it is.
+
+    Returns empty strings for anything unknown rather than inventing a label,
+    so a caller can skip a line it has nothing to put in.
+    """
+    title = str(dataset or "").strip()
+    parts: list[str] = []
+    if method:
+        parts.append(str(method))
+    if group_column:
+        parts.append(f"grid by {field_label(group_column)}")
+        # When faceting, colour is only worth naming if it is a DIFFERENT
+        # field -- otherwise the line says the same thing twice.
+        if column and column != group_column:
+            parts.append(f"colour: {field_label(column)}")
+    elif column:
+        parts.append(f"colour: {field_label(column)}")
+    if total:
+        if shown and shown < total:
+            parts.append(f"{shown:,} of {total:,} points")
+        else:
+            parts.append(f"{total:,} points")
+    return title, " · ".join(parts)
+
+
 def _percent_of(text: str) -> float | None:
     """The fraction a subsample choice stands for, or None for all of it."""
     cleaned = text.strip().rstrip("%").split(" ")[0]
@@ -1688,6 +1734,18 @@ class EmbeddingExplorer(QWidget):
                     break
         self.colour_box.blockSignals(False)
 
+        # Signals were blocked for the rebuild -- otherwise clear() alone
+        # would fire currentIndexChanged once per removed item and queue a
+        # redraw for each. But that also swallows the REAL change: if the
+        # column that survived is not the column that was selected before
+        # (the old one is gone from this dataset, or a fallback was picked),
+        # the plot is still coloured by the old field while the box shows the
+        # new one, and nothing repaints it. That is the "colour-by dropdown
+        # does not react" symptom -- it reacts, but only to the next
+        # unrelated redraw.
+        if self.colour_box.currentData() != current:
+            self.schedule_redraw()
+
     def _clear_filters(self) -> None:
         self.filters.clear()
         while self.filter_layout.count():
@@ -2566,6 +2624,12 @@ class EmbeddingExplorer(QWidget):
         key = self.palette_box.currentData()
         if key:
             set_active_palette(key)
+        # set_active_palette changes what every category's colour IS, so a
+        # palette swap that happens during a rebuild has to repaint too --
+        # otherwise the plot keeps the old scale while the box names the new
+        # one, and the legend and the points disagree.
+        if key != previous:
+            self.schedule_redraw()
 
     def _rebuild_shape_options(self) -> None:
         """Offer low-cardinality categoricals for shape."""
@@ -2581,6 +2645,12 @@ class EmbeddingExplorer(QWidget):
         index = self.shape_box.findData(previous)
         self.shape_box.setCurrentIndex(max(0, index))
         self.shape_box.blockSignals(False)
+        # Same swallowed-change problem as _rebuild_colour_options: blocking
+        # signals for the rebuild also hides a shape column that did not
+        # survive into this dataset, leaving the plot shaped by a field the
+        # box no longer shows.
+        if self.shape_box.currentData() != previous:
+            self.schedule_redraw()
 
     def _on_group_changed(self) -> None:
         """Switch between one plot and a facet per group."""
@@ -2632,7 +2702,14 @@ class EmbeddingExplorer(QWidget):
         index = self.group_box.findData(previous)
         self.group_box.setCurrentIndex(max(0, index))
         self.group_box.blockSignals(False)
+        changed = self.group_box.currentData() != previous
         self._group_column = self.group_box.currentData()
+        if changed:
+            # The most consequential of these: faceting is what decides
+            # whether the centre shows one plot or a grid, so a silently
+            # dropped group column leaves the wrong widget on screen -- and
+            # _on_group_changed, which swaps them, never ran.
+            self._on_group_changed()
 
     def set_image_mode(self, enabled: bool) -> None:
         """Turn image tracing on or off for the whole explorer.
@@ -3088,15 +3165,26 @@ class EmbeddingExplorer(QWidget):
             return
         if not target.lower().endswith(f".{fmt}"):
             target = f"{target}.{fmt}"
+        # What the file says it is, once it is out of the app. Built from the
+        # same facts as the filename, which a rename or a drop into a document
+        # destroys.
+        title, subtitle = export_headline(
+            dataset=(entry.name if (entry := self.workspace.current) else None),
+            method=self.result.params.method,
+            column=self.colour_box.currentData(),
+            group_column=self._group_column,
+            shown=len(self.result.row_indices),
+            total=self.dataset.n_points if self.dataset is not None else 0,
+        )
         try:
             # Whichever view is actually on screen -- the single plot has its
             # own scene, the grid is several, composed differently. Exporting
             # the wrong one is what makes a saved file not match what a user
             # was just looking at.
             if faceting:
-                self.grid.export(target)
+                self.grid.export(target, title=title, subtitle=subtitle)
             else:
-                self.scatter.export(target)
+                self.scatter.export(target, title=title, subtitle=subtitle)
         except Exception as exc:  # noqa: BLE001 - report rather than crash
             QMessageBox.warning(self, "Export failed", str(exc))
             return

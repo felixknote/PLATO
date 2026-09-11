@@ -26,6 +26,8 @@ merely "at least one".
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QPointF, Qt, Signal
@@ -181,6 +183,106 @@ def _draw_order(
                 chunked.append((colour, symbol, piece))
     order = rng.permutation(len(chunked))
     return [chunked[i] for i in order]
+
+
+def _save_image_with_headline(
+    plot_image, path: str, title: str, subtitle: str, *, background: QColor
+) -> None:
+    """Write ``plot_image`` to ``path`` with a headline block above it."""
+    from PySide6.QtGui import QImage, QPainter
+
+    from . import headline
+
+    block = headline.height(title, subtitle)
+    width = plot_image.width()
+    canvas = QImage(
+        width, plot_image.height() + block, QImage.Format.Format_ARGB32
+    )
+    # Fill with the plot's own background, alpha included: a transparent
+    # export must stay transparent behind the headline too, or the title
+    # block becomes an opaque bar over whatever the figure is placed on.
+    canvas.fill(background)
+    painter = QPainter(canvas)
+    try:
+        headline.draw(painter, title, subtitle, width=width, background=background)
+        painter.drawImage(0, block, plot_image)
+    finally:
+        painter.end()
+    canvas.save(path)
+
+
+def _prepend_svg_headline(
+    path: str, title: str, subtitle: str, *, background: QColor
+) -> None:
+    """Grow a pyqtgraph SVG's canvas and put a headline in the new space.
+
+    The text goes in as real ``<text>``, not a rasterised strip: the whole
+    reason this plot has an SVG exporter is that the output stays editable in
+    Illustrator or Inkscape, and a title is the element most likely to need
+    editing there.
+
+    pyqtgraph writes a fixed ``viewBox="0 0 W H"`` followed by a full-bleed
+    background ``<rect>``. This rewrites the viewBox to make room, re-spans
+    that rect over the taller canvas, and wraps the rest in a translated
+    group so every drawn coordinate still lands where the exporter put it.
+    """
+    import re
+    import xml.sax.saxutils as saxutils
+
+    from . import headline
+
+    block = headline.height(title, subtitle)
+    if block <= 0:
+        return
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return
+
+    match = re.search(
+        r'viewBox\s*=\s*"0 0 ([\d.]+) ([\d.]+)"', text
+    )
+    if match is None:  # not a shape we recognise; leave the file untouched
+        return
+    width, height = float(match.group(1)), float(match.group(2))
+
+    text = text.replace(
+        match.group(0), f'viewBox="0 0 {width:g} {height + block:g}"', 1
+    )
+    # The exporter's own background rect is "100%" tall, so it already covers
+    # the taller canvas -- nothing to patch there.
+
+    title_ink, subtitle_ink = headline.ink_for(background)
+    lines = []
+    y = headline.MARGIN_TOP
+    if title:
+        y += headline.TITLE_PT * 1.2
+        lines.append(
+            f'<text x="{headline.MARGIN_X}" y="{y:g}" '
+            f'font-family="sans-serif" font-size="{headline.TITLE_PT * 1.333:g}" '
+            f'font-weight="bold" fill="{title_ink.name()}">'
+            f"{saxutils.escape(title)}</text>"
+        )
+    if subtitle:
+        y += headline.GAP + headline.SUBTITLE_PT * 1.333
+        lines.append(
+            f'<text x="{headline.MARGIN_X}" y="{y:g}" '
+            f'font-family="sans-serif" font-size="{headline.SUBTITLE_PT * 1.333:g}" '
+            f'fill="{subtitle_ink.name()}">{saxutils.escape(subtitle)}</text>'
+        )
+
+    # Everything the exporter drew, pushed down to sit under the headline.
+    body_start = text.index("<defs>")
+    end = text.rindex("</svg>")
+    head, body = text[:body_start], text[body_start:end]
+    text = (
+        head
+        + "\n".join(lines)
+        + f'\n<g transform="translate(0,{block:g})">\n'
+        + body
+        + "\n</g>\n</svg>"
+    )
+    Path(path).write_text(text, encoding="utf-8")
 
 
 class EmbeddingScatter(QWidget):
@@ -831,24 +933,53 @@ class EmbeddingScatter(QWidget):
 
     # -- export -----------------------------------------------------------
 
-    def export(self, path: str, *, width: int = 1600) -> None:
+    def export(
+        self,
+        path: str,
+        *,
+        width: int = 1600,
+        title: str = "",
+        subtitle: str = "",
+    ) -> None:
         """Write the current scene to PNG or SVG, by file extension.
 
         Both come from the live scene, so whatever is on screen -- method,
         colouring, filtering, zoom and legend -- is what lands in the file.
+
+        ``title``/``subtitle`` are composed ABOVE the plot rather than inside
+        it, so the headline never covers data and the plot keeps the extent it
+        was laid out with. See :mod:`plato.views.headline` for why an export
+        needs one at all.
         """
         import pyqtgraph.exporters as exporters
 
         plot_item = self.plot.getPlotItem()
         if path.lower().endswith(".svg"):
             exporter = exporters.SVGExporter(plot_item)
-        else:
-            exporter = exporters.ImageExporter(plot_item)
-            # Set width only, and let the exporter derive height from the
-            # scene's aspect ratio; setting both distorts the plot.
-            exporter.parameters()["width"] = width
-            # A transparent plot must export transparent. The exporter fills
-            # its canvas with this colour, so passing an alpha-zero QColor is
-            # what makes the PNG genuinely transparent rather than white.
-            exporter.parameters()["background"] = self.background_colour()
-        exporter.export(path)
+            exporter.export(path)
+            if title or subtitle:
+                _prepend_svg_headline(
+                    path, title, subtitle, background=self.background_colour()
+                )
+            return
+
+        exporter = exporters.ImageExporter(plot_item)
+        # Set width only, and let the exporter derive height from the
+        # scene's aspect ratio; setting both distorts the plot.
+        exporter.parameters()["width"] = width
+        # A transparent plot must export transparent. The exporter fills
+        # its canvas with this colour, so passing an alpha-zero QColor is
+        # what makes the PNG genuinely transparent rather than white.
+        background = self.background_colour()
+        exporter.parameters()["background"] = background
+        if not (title or subtitle):
+            exporter.export(path)
+            return
+
+        # Render to an image first, then paste it under the headline. Going
+        # through the exporter's own file write and re-reading it would lose
+        # the alpha channel on a transparent export.
+        plot_image = exporter.export(toBytes=True)
+        _save_image_with_headline(
+            plot_image, path, title, subtitle, background=background
+        )

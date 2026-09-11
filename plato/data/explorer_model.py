@@ -20,6 +20,7 @@ from pathlib import Path
 import pandas as pd
 
 from .annotations import UNANNOTATED, AnnotationTable, parse_condition
+from . import plate_location
 from .embeddings import EmbeddingDataset
 from .image_lookup import (
     ImageIndex,
@@ -64,6 +65,7 @@ FIELD_LABELS = {
     ROLE: "Control vs treatment",
     CONTROL_KIND: "Control type",
     PERTURBATION: "Perturbation (gene or drug)",
+    **plate_location.FIELD_LABELS,
 }
 
 # Offered as colour-by options in this order, when the column has values.
@@ -81,6 +83,11 @@ COLOUR_FIELDS = (
     EXPERIMENT,
     PLATE,
     WELL,
+    # Plate geometry last: these answer "where was it", not "what was in it",
+    # and are what you reach for once a biological encoding looks suspicious.
+    plate_location.WELL_ROW,
+    plate_location.WELL_COL,
+    plate_location.EDGE_DISTANCE,
 )
 
 # Offered as filters. Deliberately fewer than the colour fields: filtering by
@@ -269,6 +276,14 @@ def build_frame(
     pathway = pathway_table or AnnotationTable.empty()
     frame[MOA] = [moa.get(c.drug) if c.drug else UNANNOTATED for c in parsed]
     frame[PATHWAY] = [pathway.get(c.gene) if c.gene else UNANNOTATED for c in parsed]
+
+    # Where on the plate each point sat -- row, column, rings in from the
+    # edge. Derived here rather than at each of the explorer's four
+    # self.frame assignments, so every path that builds a frame gets them.
+    # Adds nothing when the well column is absent or does not parse, which is
+    # what keeps the options off the dropdown for a dataset that has no
+    # plate geometry to speak of.
+    plate_location.add_columns(frame, WELL)
 
     resolver = ImageResolver.detect(image_root, frame) if image_root else None
     return frame, resolver

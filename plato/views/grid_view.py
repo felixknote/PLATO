@@ -375,8 +375,8 @@ class GridView(QWidget):
 
     # -- export -----------------------------------------------------------
 
-    def export(self, path: str) -> None:
-        """Write the current page -- legend and every facet -- to one file.
+    def export(self, path: str, *, title: str = "", subtitle: str = "") -> None:
+        """Write the current page -- headline, legend and every facet -- to one file.
 
         A facet is a real pyqtgraph scene same as the single plot, but there
         are several of them side by side, and pyqtgraph's exporters draw one
@@ -417,7 +417,12 @@ class GridView(QWidget):
             legend_height = (
                 self.legend.sizeHint().height() if self.legend.has_entries else 0
             )
-        height = legend_height + content_height
+        # The headline sits above the legend: it names the whole page, the
+        # legend decodes the colours within it.
+        from . import headline as headline_block
+
+        head_height = headline_block.height(title, subtitle)
+        height = head_height + legend_height + content_height
 
         if path.lower().endswith(".svg"):
             from PySide6.QtSvg import QSvgGenerator
@@ -433,6 +438,15 @@ class GridView(QWidget):
             painter = QPainter(pixmap)
 
         try:
+            if head_height:
+                headline_block.draw(
+                    painter,
+                    title,
+                    subtitle,
+                    width=width,
+                    background=self._page_background(),
+                )
+                painter.translate(0, head_height)
             if legend_height:
                 self.legend.render(painter, QPoint(0, 0))
             painter.translate(0, legend_height)
