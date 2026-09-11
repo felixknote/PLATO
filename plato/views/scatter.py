@@ -34,6 +34,17 @@ from PySide6.QtWidgets import QGraphicsRectItem, QVBoxLayout, QWidget
 
 from ..gui.theme import BORDER, IMAGE_BACKGROUND, TEXT, TEXT_MUTED
 
+# The live lasso stroke, and the one place the logo's undiluted cyan is used.
+#
+# The chrome runs a held-back #34c7d4 because full saturation vibrates against
+# the navy on a 1 px border. A lasso is the opposite case: it exists for the
+# seconds you are dragging it, it must be unmistakable over a dense scatter of
+# points in any palette, and it is gone before it can tire anyone out. It is
+# also deliberately NOT a theme colour -- the plot ground is independent of
+# the app theme (a dark UI with a white plot is correct when the plot is bound
+# for a figure), and this reads on both.
+LASSO_STROKE = "#1af8fe"
+
 pg.setConfigOption("background", IMAGE_BACKGROUND)
 pg.setConfigOption("foreground", TEXT_MUTED)
 pg.setConfigOption("antialias", True)
@@ -235,7 +246,7 @@ class EmbeddingScatter(QWidget):
         self._lasso_additive = False
         self._lasso_points: list[tuple[float, float]] = []
         self._lasso_curve = pg.PlotCurveItem(
-            pen=pg.mkPen(TEXT, width=1.5, style=Qt.PenStyle.DashLine)
+            pen=pg.mkPen(LASSO_STROKE, width=1.5, style=Qt.PenStyle.DashLine)
         )
         self._lasso_curve.setZValue(90)
         self.plot.addItem(self._lasso_curve)
@@ -591,8 +602,9 @@ class EmbeddingScatter(QWidget):
         from ..gui import themes as _themes
 
         self._highlight.setPen(pg.mkPen(_themes.current().text, width=2))
+        # Not a theme colour: see LASSO_STROKE.
         self._lasso_curve.setPen(
-            pg.mkPen(_themes.current().text, width=1.5, style=Qt.PenStyle.DashLine)
+            pg.mkPen(LASSO_STROKE, width=1.5, style=Qt.PenStyle.DashLine)
         )
 
     def background_colour(self) -> QColor:

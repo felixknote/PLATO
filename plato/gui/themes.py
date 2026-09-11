@@ -60,47 +60,68 @@ class ThemeColours:
     plot_background: str
 
 
+# The chrome descends from the logo (scripts/make_logo.py): a deep navy plate
+# with a handful of wells glowing cyan and magenta. That artwork already was
+# the identity; the interface used to run a generic Windows blue alongside it.
+#
+# Two hues are now RESERVED, and mean one thing each:
+#   cyan    -- selected / active. The accent.
+#   magenta -- control wells, and anything flagged. The reference points every
+#              other point is judged against.
+# Both are held out of the categorical scales (see views/palettes.py), so a
+# coloured mark in a plot is never the same hue as an interface state.
+# Everything else is low-chroma navy, so colour anywhere on screen is data.
 DARK_COLOURS = ThemeColours(
     key=DARK,
     name="Dark",
-    # Kept a touch blue: flat greys look muddy next to a greyscale image.
-    background="#16181d",
-    surface="#1e2127",
-    surface_raised="#252932",
-    border="#333945",
-    border_strong="#3f4653",
-    text="#e4e7ec",
-    text_muted="#9aa3b2",
-    text_faint="#6b7482",
-    accent="#4a90d9",
-    accent_hover="#5b9fe3",
-    accent_pressed="#3d7cbd",
-    flag="#e8a33d",
+    # The logo's TILE_BG family. Navy rather than neutral grey: it reads as
+    # the dark plate the app is a window onto, and flat greys look muddy
+    # next to a greyscale image anyway.
+    background="#0a0f1c",
+    surface="#111827",
+    surface_raised="#18202f",
+    border="#222d42",
+    border_strong="#2f3d56",
+    text="#e6ebf2",
+    text_muted="#94a3b8",
+    text_faint="#64748b",
+    # The logo's cyan, held back from its full #1af8fe: at full saturation a
+    # 1 px border of it vibrates against the navy. Raw #1af8fe is reserved
+    # for the live lasso stroke alone -- see views/scatter.py.
+    accent="#34c7d4",
+    accent_hover="#4fdbe8",
+    accent_pressed="#1f9fad",
+    flag="#ea45cc",
     # Darker than the panel so an image edge reads as an edge, but not black,
     # which makes dark pixels unjudgeable.
-    image_background="#0d0f12",
-    plot_background="#0d0f12",
+    image_background="#05080f",
+    plot_background="#05080f",
 )
 
 LIGHT_COLOURS = ThemeColours(
     key=LIGHT,
     name="Light",
-    # Warm-neutral rather than pure white: a full-white chrome around a
+    # Cool-neutral rather than pure white: a full-white chrome around a
     # greyscale micrograph glares and skews how you judge intensity by eye,
-    # which is the same reason the dark theme is not pure black.
-    background="#f4f5f7",
+    # which is the same reason the dark theme is not pure black. Tinted
+    # toward the same navy as the dark theme so the two read as one product.
+    background="#f2f4f8",
     surface="#ffffff",
-    surface_raised="#eceef1",
-    border="#d3d7de",
-    border_strong="#b8bec8",
-    text="#1c1f25",
-    text_muted="#5a6270",
-    text_faint="#868e9b",
-    # Darkened from the dark theme's accent to keep contrast on a light ground.
-    accent="#2b6cb0",
-    accent_hover="#3a7cc0",
-    accent_pressed="#225a94",
-    flag="#b9761a",
+    surface_raised="#e8ecf3",
+    border="#ced6e2",
+    border_strong="#aeb9c9",
+    text="#101827",
+    text_muted="#53607a",
+    # 3.31:1 on the page ground. The obvious lighter #8492a8 measured 2.86:1,
+    # under the 3:1 floor, and this colour carries hint text.
+    text_faint="#7a8799",
+    # The same two reserved hues as the dark theme, darkened to hold contrast
+    # on a light ground: #34c7d4 on white is 2.05:1 and unusable for a state
+    # that has to be noticed. These keep the hue and buy the contrast back.
+    accent="#0e7c8c",
+    accent_hover="#0f8fa1",
+    accent_pressed="#0a616e",
+    flag="#a81f8c",
     # Still dark: an image canvas is a viewing surface, not chrome, and a
     # white surround around a fluorescence image destroys the contrast the
     # image is being judged on.

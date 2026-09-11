@@ -45,17 +45,35 @@ class Palette:
 
 # The app's own qualitative scale. Ordered so consecutive hues never differ by
 # red/green alone.
+#
+# Six slots (2, 7, 8, 12, 13, 15) are deliberately held away from two hues the
+# CHROME owns: the cyan accent (~185 deg) that means "selected/active", and the
+# magenta (~311 deg) that means "control". Before this, index 7 sat 5 deg from
+# the accent and index 15 sat 10 deg from it, so a plain condition was the same
+# colour as a selection. Their replacements keep each original's lightness and
+# saturation and move only hue, chosen to maximise the minimum separation from
+# every other entry AND from both chrome hues; the worst case is now 19 deg.
+#
+# The rule this encodes: a hue the interface uses to mean something is not
+# available to the data. Adding a colour here means re-checking that.
 _PLATO = (
-    "#4a90d9", "#e8a33d", "#4fc3a1", "#e2647a", "#a98bdc",
-    "#8fc866", "#e07b53", "#5bc0d4", "#d98cc4", "#c2b34a",
-    "#7f9cd4", "#d4735a", "#6cc39a", "#c98fb0", "#9ab84f",
-    "#6fb3c9", "#d9a05b", "#8d9ee0", "#b5cc5e", "#df8f8f",
+    "#4a90d9", "#e8a33d", "#4fc376", "#e2647a", "#a98bdc",
+    "#8fc866", "#e07b53", "#b85bd4", "#90d98c", "#c2b34a",
+    "#7f9cd4", "#d4735a", "#6cc3a9", "#c98fac", "#9ab84f",
+    "#766fc9", "#d9a05b", "#8d9ee0", "#b5cc5e", "#df8f8f",
 )
 
 # Okabe & Ito (2008), the standard colour-blind-safe qualitative set. Eight
 # colours chosen to stay distinct under deuteranopia, protanopia and
 # tritanopia. Short, by design -- if a field needs more than eight classes,
 # colour is the wrong encoding for it.
+#
+# EXEMPT from the chrome-hue rule that shapes _PLATO and _BRIGHT, as is
+# _TABLEAU below. These two are external standards, and their whole value is
+# that a reader already knows how to read them: #cc79a7 sits 16 deg from the
+# magenta flag and Tableau's #b07aa1 only 6 deg, but silently editing a
+# published scale would cost more than the collision does. A user who picks
+# one is choosing familiarity over PLATO's own separation guarantee.
 _OKABE_ITO = (
     "#0072b2", "#e69f00", "#009e73", "#cc79a7",
     "#56b4e9", "#d55e00", "#f0e442", "#000000",
@@ -69,9 +87,15 @@ _TABLEAU = (
 )
 
 # High-contrast set for dark backgrounds, brighter and more saturated.
+#
+# Entries 7 and 8 were #7ae0f0 (3 deg from the cyan accent) and #f5a3d8
+# (10 deg from the magenta flag) -- the same chrome collision _PLATO had, and
+# worse for being more saturated. Moved on the same rule; the result keeps a
+# 19 deg margin from both chrome hues and a 16 deg minimum inside the scale,
+# which is what the scale already had between entries 1 and 6.
 _BRIGHT = (
     "#66c2ff", "#ffb347", "#5ee6a8", "#ff7b93", "#c9a0ff",
-    "#a8e05f", "#ff9d6e", "#7ae0f0", "#f5a3d8", "#e0d24a",
+    "#a8e05f", "#ff9d6e", "#7cf07a", "#a3aaf5", "#e0d24a",
 )
 
 # Deep-toned set for light/white backgrounds. _PLATO's mid-saturation hues
@@ -79,12 +103,13 @@ _BRIGHT = (
 # washed out on white -- 17 of its 20 colours fall below WCAG's 3:1 minimum
 # contrast for graphical objects against white. Same hue order and count as
 # _PLATO so switching between them for a background change keeps each value
-# in the same relative position, just darkened.
+# in the same relative position, just darkened. The six chrome-avoiding hue
+# shifts above are mirrored here for the same reason.
 _DEEP = (
-    "#1f6fb2", "#c9700a", "#1f8f6f", "#c23a58", "#6b4a9e",
-    "#4d7a1f", "#b1461f", "#1a7d8f", "#a24f8a", "#8a7a1f",
-    "#3f5fa8", "#a1462a", "#217a56", "#93447a", "#5a7a1f",
-    "#2c7a91", "#a5701f", "#4c5cab", "#6f8a1f", "#b1504f",
+    "#1f6fb2", "#c9700a", "#1f8f44", "#c23a58", "#6b4a9e",
+    "#4d7a1f", "#b1461f", "#741a8f", "#53a24f", "#8a7a1f",
+    "#3f5fa8", "#a1462a", "#217a5f", "#93446c", "#5a7a1f",
+    "#342c91", "#a5701f", "#4c5cab", "#6f8a1f", "#b1504f",
 )
 
 # -- sequential --------------------------------------------------------------

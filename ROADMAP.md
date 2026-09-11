@@ -38,14 +38,20 @@ against real images should wait for that job, or use a local copy.
 
 ## Full revision of usability and layout
 
-The left sidebar has outgrown its column. The t-SNE panel alone is four
-nested group boxes, and the wrapping fix applied to it is a patch over a
-structural problem: the sidebar is now a long scroll of unrelated sections.
+**Status: done.** The sidebar is an accordion (`views/section.py`): seven
+sections, at most one open, so the column's height is bounded by its tallest
+section rather than the sum of all of them. The t-SNE panel now sits inside
+Embedding rather than beside it.
 
-Wants collapsible sections, or tabs (Data / Embedding / Encoding / Analysis),
-rather than more scrolling. Also worth revisiting:
-* which controls deserve to be visible at all times vs. behind a disclosure;
-* whether Display should be split into encoding vs. layout.
+Every closed section states its current value on its header ("UMAP - 5,000
+pts", "Colour: Gene", "3 active"), and Filters/Grouping/Lasso show an accent
+badge when they are actively changing what is drawn -- that is what makes
+hiding a section safe, and it was the reason to prefer an accordion over the
+tabs this entry originally proposed. Enforced by
+`tests/test_section_accordion.py`.
+
+Still open from this entry:
+* whether Encoding should split into encoding vs. layout.
 
 (The Projection / t-SNE settings split that used to duplicate perplexity in
 two places -- a standalone box shown only for UMAP, where it was never read,
@@ -81,9 +87,13 @@ docstring for the exact numbers found at each grid point.
 
 * The logo's outer arcs: 4 strands above and below the plate where the
   reference has 2.
-* Light theme has not been checked widget by widget; the mechanism works and
-  most labels now take their colour from the global stylesheet, but anything
-  still baking colours at import will stay dark until rebuilt.
+* Light theme: a runtime dark->light switch was verified by screenshot after
+  the navy retheme and leaves nothing wearing the old colours. One known
+  difference remains, and it predates that work: the Palette combo resolves
+  `categorical_for_background` when the control is BUILT, so a session
+  started in light mode selects "Deep (for light backgrounds)" while one
+  switched to light at runtime keeps "PLATO". The plots are unaffected --
+  only the combo's displayed selection is stale.
 
 ## Done, kept for context
 

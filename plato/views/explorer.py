@@ -118,6 +118,7 @@ from .open_embeddings_list import OpenEmbeddingsList
 from .stats_panel import StatsPanel
 from .selection_panel import SelectionPanel
 from .scatter import BACKGROUND_CHOICES, EmbeddingScatter
+from .section import Accordion
 
 # Legend gets unreadable long before this; past it, colour still encodes the
 # grouping but the legend is replaced by a count.
@@ -586,7 +587,7 @@ class EmbeddingExplorer(QWidget):
         data_form.setContentsMargins(6, 4, 6, 4)
         data_form.addRow("Dataset", source_widget)
         data_form.addRow("Source data", source_data_widget)
-        data_group = QGroupBox("Data")
+        data_group = QGroupBox()
         data_group.setLayout(data_form)
 
         embedding_form = QFormLayout()
@@ -606,7 +607,7 @@ class EmbeddingExplorer(QWidget):
         embedding_form.addRow(self.progress_bar)
         embedding_form.addRow(self.progress_label)
         embedding_form.addRow(self.cancel_button)
-        projection_group = QGroupBox("Embedding")
+        projection_group = QGroupBox()
         projection_group.setLayout(embedding_form)
 
         # t-SNE has far more parameters that matter than UMAP does, and they
@@ -760,7 +761,7 @@ class EmbeddingExplorer(QWidget):
         encoding_form.addRow(self.dim_others_box)
         encoding_form.addRow(self.grey_out_box)
         encoding_form.addRow(self.density_box)
-        encoding_group = QGroupBox("Encoding")
+        encoding_group = QGroupBox()
         encoding_group.setLayout(encoding_form)
 
         grouping_form = QFormLayout()
@@ -770,7 +771,7 @@ class EmbeddingExplorer(QWidget):
         grouping_form.addRow("Grid", self.grid_columns_box)
         grouping_form.addRow("Order", self.grid_sort_box)
         grouping_form.addRow(self.grid_page_widget)
-        grouping_group = QGroupBox("Grouping")
+        grouping_group = QGroupBox()
         grouping_group.setLayout(grouping_form)
 
         # --- lasso analysis
@@ -784,7 +785,7 @@ class EmbeddingExplorer(QWidget):
         self.cluster_panel.show_images_requested.connect(self._show_selection_images)
         # clear_requested is connected after the scatter exists; the display
         # controls are built before it.
-        cluster_group = QGroupBox("Lasso Analysis")
+        cluster_group = QGroupBox()
         cluster_layout = QVBoxLayout()
         cluster_layout.setContentsMargins(6, 4, 6, 4)
         cluster_layout.addWidget(self.cluster_panel)
@@ -800,7 +801,7 @@ class EmbeddingExplorer(QWidget):
         self.stats_panel.compute_requested.connect(self._compute_image_stats)
         self.stats_panel.cancel_requested.connect(self._cancel_image_stats)
         self.stats_panel.stat_selected.connect(self._on_stat_selected)
-        stats_group = QGroupBox("Image Statistics")
+        stats_group = QGroupBox()
         stats_layout = QVBoxLayout()
         stats_layout.setContentsMargins(6, 4, 6, 4)
         stats_layout.addWidget(self.stats_panel)
@@ -815,23 +816,61 @@ class EmbeddingExplorer(QWidget):
         clear_filters = QPushButton("Clear filters")
         clear_filters.clicked.connect(self.clear_filters)
 
-        left = QVBoxLayout()
-        left.setContentsMargins(10, 10, 10, 10)
-        left.setSpacing(10)
+        # --- the sidebar, as an accordion
+        #
+        # These seven used to be seven permanently-expanded QGroupBoxes in one
+        # scrolling column, and the t-SNE panel added four nested boxes of its
+        # own. See views/section.py for why one-open-at-a-time is the fix and
+        # why the closed summaries are what make it safe.
+        #
+        # Each section body is a plain QWidget named "sectionBody", which is
+        # what the stylesheet targets to strip the now-redundant group-box
+        # chrome from anything inside.
+
+        def _body(*widgets: QWidget) -> QWidget:
+            body = QWidget()
+            body.setObjectName("sectionBody")
+            layout = QVBoxLayout()
+            layout.setContentsMargins(10, 6, 10, 10)
+            layout.setSpacing(8)
+            for widget in widgets:
+                layout.addWidget(widget)
+            body.setLayout(layout)
+            return body
+
+        filter_body = QWidget()
+        filter_body.setLayout(self.filter_layout)
+
+        self.accordion = Accordion()
         # Order follows the workflow: choose data, project it, encode it,
         # group it, analyse a region, filter. Image Statistics goes LAST
         # because it is the only optional, expensive step -- it belongs where
         # you arrive after everything else, not in the middle of styling.
-        left.addWidget(data_group)
-        left.addWidget(projection_group)
-        left.addWidget(self.tsne_group)
-        left.addWidget(encoding_group)
-        left.addWidget(grouping_group)
-        left.addWidget(cluster_group)
-        left.addLayout(self.filter_layout)
-        left.addWidget(clear_filters)
-        left.addWidget(stats_group)
-        left.addStretch(1)
+        self.accordion.add("data", "Data", _body(data_group))
+        # t-SNE settings live INSIDE Embedding rather than beside it: they are
+        # that section's parameters, not a peer of it, and as a sibling they
+        # appeared and vanished from the column depending on the method.
+        self.accordion.add(
+            "embedding", "Embedding", _body(projection_group, self.tsne_group)
+        )
+        self.accordion.add("encoding", "Encoding", _body(encoding_group))
+        self.accordion.add("grouping", "Grouping", _body(grouping_group))
+        self.accordion.add("lasso", "Lasso analysis", _body(cluster_group))
+        self.accordion.add("filters", "Filters", _body(filter_body, clear_filters))
+        self.accordion.add("stats", "Image statistics", _body(stats_group))
+        self.accordion.add_stretch()
+        # Data is where the workflow starts and the only section that is
+        # useless closed on an empty app.
+        self.accordion.open_section("data")
+        # Seed the closed-state summaries. Without this the headers stay blank
+        # until the first control change, which is exactly the state the
+        # summaries exist to explain.
+        self._update_section_summaries()
+
+        left = QVBoxLayout()
+        left.setContentsMargins(10, 10, 10, 10)
+        left.setSpacing(10)
+        left.addWidget(self.accordion)
 
         left_container = QWidget()
         left_container.setLayout(left)
@@ -959,7 +998,11 @@ class EmbeddingExplorer(QWidget):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
-        self.splitter.setSizes([300, 1000, 360])
+        # 340, not 300: the sidebar opens at its minimum, and at 300 the
+        # section forms (a label column plus a combo) are a few pixels wider
+        # than the pane, so every combo clipped its right edge on first show.
+        # Measured against the widest section body rather than guessed.
+        self.splitter.setSizes([340, 1000, 360])
         self.splitter.setChildrenCollapsible(False)
         # Wider column, bigger previews. Debounced: a drag emits a signal per
         # pixel, and re-decoding images on each would make the drag crawl.
@@ -1669,6 +1712,7 @@ class EmbeddingExplorer(QWidget):
         for box in self.filters:
             box.clear()
         self._redraw()
+        self._update_section_summaries()
 
     def current_filters(self) -> dict[str, list[str]]:
         return {box.column: box.selected() for box in self.filters if box.selected()}
@@ -1838,6 +1882,71 @@ class EmbeddingExplorer(QWidget):
     def schedule_redraw(self, *_args) -> None:
         """Coalesce rapid control changes into one redraw."""
         self._redraw_timer.start()
+        self._update_section_summaries()
+
+    def _update_section_summaries(self) -> None:
+        """Put each section's current value on its header.
+
+        This is what makes one-open-at-a-time safe: the whole configuration
+        stays readable with every section shut, so collapsing a control never
+        conceals its effect. Sections whose state is actively changing what is
+        drawn (a live filter, a held selection, a facet) also get a badge, in
+        the accent -- the interface's one colour for "this is live".
+
+        Cheap and defensive by design: it runs on every control change, and a
+        missing widget or an empty frame must degrade to a blank summary
+        rather than raise into a redraw path.
+        """
+        accordion = getattr(self, "accordion", None)
+        if accordion is None:
+            return
+
+        def _label(box) -> str:
+            data = box.currentData()
+            if not data:
+                return ""
+            return field_label(data) if isinstance(data, str) else str(data)
+
+        # Data: which export is open. From the workspace, not dataset_box --
+        # that combo picks a DIRECTORY to search and is empty whenever the
+        # dataset arrived by any other route (a restored workspace, a
+        # combine, computed features).
+        entry = self.workspace.current
+        name = entry.name if entry is not None else ""
+        extra = len(self.workspace.entries) - 1
+        if name and extra > 0:
+            name = f"{name} (+{extra})"
+        accordion.set_summary("data", name)
+
+        # Embedding: method and how many points it was fitted on.
+        method = self.method_box.currentText()
+        if self.result is not None:
+            points = f"{len(self.result.row_indices):,} pts"
+            accordion.set_summary("embedding", f"{method} · {points}")
+        else:
+            accordion.set_summary("embedding", f"{method} · not run")
+
+        # Encoding: what colour means, since that is the one a reader of the
+        # plot has to know to interpret it at all.
+        colour = _label(self.colour_box)
+        accordion.set_summary("encoding", f"Colour: {colour}" if colour else "")
+
+        # Grouping: faceting is a structural change to the plot, so it badges.
+        group = _label(self.group_box)
+        accordion.set_summary("grouping", group or "off")
+        accordion.set_badge("grouping", bool(self._group_column))
+
+        # Lasso: a held selection changes what the right-hand panels show.
+        scatter = getattr(self, "scatter", None)
+        selected = len(scatter.selected_rows) if scatter is not None else 0
+        accordion.set_summary("lasso", f"{selected:,} selected" if selected else "")
+        accordion.set_badge("lasso", bool(selected))
+
+        # Filters: the one that genuinely hides something. An active filter
+        # silently removes points, so it always badges and always counts.
+        active = len(self.current_filters())
+        accordion.set_summary("filters", f"{active} active" if active else "")
+        accordion.set_badge("filters", bool(active))
 
     def _colour_universe(self, column: str | None) -> list[str]:
         """Every value ``column`` takes across the whole frame, unknowns last.
@@ -1867,6 +1976,7 @@ class EmbeddingExplorer(QWidget):
         # A queued redraw may still be pending when an immediate one runs
         # (e.g. a fresh projection); dropping it avoids drawing twice.
         self._redraw_timer.stop()
+        self._update_section_summaries()
         if self.result is None or self.frame is None:
             return
 
@@ -2169,6 +2279,9 @@ class EmbeddingExplorer(QWidget):
         self._sync_open_box()
         if self.workspace.current_key == entry.key and self._active_key != entry.key:
             self._switch_to(entry.key)
+        # Which export is open is the Data section's whole summary, and this
+        # is the one place that changes.
+        self._update_section_summaries()
 
     def _sync_open_box(self) -> None:
         """Refresh the open-embeddings list from the workspace.
@@ -2676,6 +2789,7 @@ class EmbeddingExplorer(QWidget):
         else:
             self.metadata_panel.set_rows(rows)
         self._update_composition(rows)
+        self._update_section_summaries()
         if len(rows):
             self.status.emit(f"{len(rows):,} point{'s' if len(rows) != 1 else ''} selected")
 

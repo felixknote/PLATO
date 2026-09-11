@@ -61,6 +61,7 @@ plato/
 | `cluster_panel.py` | Lasso Analysis: ranked composition of a selection |
 | `stats_panel.py` / `stats_worker.py` | opt-in image statistics + its progress |
 | `compare_view.py` | `ComparisonView`/`ComparisonColumn`, shared locked `Viewport` |
+| `section.py` | `Accordion`/`Section`: the sidebar's one-open-at-a-time column |
 | `palette.py` | value -> colour/shape assignment, stable across filters |
 | `palettes.py` | the palette registry: every named categorical/sequential/diverging scale |
 | `browser.py`, `model.py`, `preview.py` | browser arm + shared decode |
@@ -88,6 +89,23 @@ plato/
 `gui/theme.py` holds the palette constants and one big `STYLESHEET`, applied
 once to the `QApplication`.
 
+**Two hues are reserved and mean one thing each**, in both themes:
+
+| hue | meaning | where |
+|---|---|---|
+| cyan | selected / active | `accent`; raw `#1af8fe` for the live lasso only |
+| magenta | control wells, flagged | `flag` |
+
+Both are held OUT of the categorical scales PLATO owns (`plato`, `deep`,
+`bright` in `views/palettes.py`), so a coloured mark in a plot is never the
+same hue as an interface state. `tests/test_section_accordion.py` enforces a
+15-degree minimum. Okabe-Ito and Tableau are deliberately exempt: they are
+external standards whose value is that a reader already knows them.
+
+The chrome descends from the logo (`scripts/make_logo.py`) -- a deep navy
+plate with wells glowing cyan and magenta -- rather than running a separate
+generic blue alongside it.
+
 **Caveat that matters:** many widgets import colour constants at module import
 time and bake them into f-string stylesheets (`setStyleSheet(f"color: {TEXT}")`).
 Reassigning the module constants therefore does **not** restyle anything already
@@ -105,6 +123,18 @@ widgets re-read their colours.
 - After L2-normalising, cosine and Euclidean give identical neighbours —
   ask for Euclidean, it has a fast path (measured 2.5× faster, ARI 1.000).
 - `QSettings` defaults only apply when nothing was saved before.
+- `QWidget.grab()` on a window that was just shown renders STALE geometry --
+  observed painting a collapsed accordion section at its old expanded height,
+  and clipping widgets that measured correctly. Verify layout by reading
+  `geometry()`, and screenshot via `screen.grabWindow(win.winId())` after the
+  event loop has settled, not `widget.grab()`.
+- `QSizePolicy.Ignored` on a label lets the layout collapse it to width 0
+  while `isVisible()` still returns True and `sizeHint()` still reports the
+  full width -- it renders nothing and every measurement says it is fine.
+  Use `Preferred` plus explicit `elidedText` when a label must yield space.
+- An unstyled `QSlider` takes its groove colour from the QPalette Highlight,
+  not the stylesheet, so it keeps the old accent after a theme change until
+  a `QSlider::sub-page` rule exists.
 - pyqtgraph draws same-z-value `ScatterPlotItem`s in ADD order, which for the
   explorer's colour groups was alphabetical by category label -- so
   whichever category sorted last always painted over every other one where

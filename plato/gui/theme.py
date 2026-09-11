@@ -3,8 +3,12 @@
 Scientific image browsing wants a dark, low-chroma interface: the images are
 the only thing that should be bright, and a light grey chrome around a 16-bit
 micrograph both fights it for attention and skews how you judge intensity by
-eye. Everything here is neutral grey except one accent colour, used only where
-something is selected or active.
+eye. Everything here is low-chroma navy -- the logo's own ground -- except two
+reserved hues: cyan for selected/active, magenta for controls and flags.
+
+Those two are held out of the plot palettes (views/palettes.py) so that a
+coloured mark in a plot can never be mistaken for an interface state. Colour
+on screen is data; the interface is not.
 
 Applied once to the QApplication, so every window, dialog and popup inherits
 it -- there is no per-widget styling anywhere else in the GUI beyond object
@@ -20,24 +24,26 @@ from PySide6.QtWidgets import QApplication
 
 # Neutral greys, dark to light. Kept a touch blue to avoid the muddy look flat
 # greys get next to a greyscale image.
-BACKGROUND = "#16181d"
-SURFACE = "#1e2127"
-SURFACE_RAISED = "#252932"
-BORDER = "#333945"
-BORDER_STRONG = "#3f4653"
+BACKGROUND = "#0a0f1c"
+SURFACE = "#111827"
+SURFACE_RAISED = "#18202f"
+BORDER = "#222d42"
+BORDER_STRONG = "#2f3d56"
 
-TEXT = "#e4e7ec"
-TEXT_MUTED = "#9aa3b2"
-TEXT_FAINT = "#6b7482"
+TEXT = "#e6ebf2"
+TEXT_MUTED = "#94a3b8"
+TEXT_FAINT = "#64748b"
 
-ACCENT = "#4a90d9"
-ACCENT_HOVER = "#5b9fe3"
-ACCENT_PRESSED = "#3d7cbd"
-FLAG = "#e8a33d"
+# Cyan = selected/active, magenta = control/flagged. Both are held out of the
+# categorical scales in views/palettes.py; see themes.DARK_COLOURS.
+ACCENT = "#34c7d4"
+ACCENT_HOVER = "#4fdbe8"
+ACCENT_PRESSED = "#1f9fad"
+FLAG = "#ea45cc"
 
 # The canvas an image sits on: darker than the panel so the image edge reads
 # as an edge, without being pure black, which makes dark pixels unjudgeable.
-IMAGE_BACKGROUND = "#0d0f12"
+IMAGE_BACKGROUND = "#05080f"
 
 # The stylesheet as a TEMPLATE rather than a baked string.
 #
@@ -191,9 +197,9 @@ QGroupBox::title {{
     subcontrol-position: top left;
     left: 10px;
     padding: 0 5px;
-    color: {TEXT_MUTED};
-    font-size: 12px;
-    text-transform: uppercase;
+    color: {TEXT};
+    font-family: {DISPLAY_STACK};
+    font-size: 13px;
 }}
 
 /* -- checkboxes ------------------------------------------------------- */
@@ -211,6 +217,35 @@ QCheckBox::indicator:checked {{
     background-color: {ACCENT};
     border-color: {ACCENT};
 }}
+
+/* -- sliders ----------------------------------------------------------- */
+
+/* Point size and opacity. Unstyled, these fell through to Fusion's own
+   drawing, which paints the groove from the QPalette Highlight and so kept
+   rendering the pre-navy blue after the theme changed -- the one control in
+   the sidebar still wearing the old accent. */
+
+QSlider::groove:horizontal {{
+    height: 4px;
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 2px;
+}}
+QSlider::sub-page:horizontal {{
+    background: {ACCENT};
+    border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    background: {TEXT};
+    border: none;
+    width: 12px;
+    height: 12px;
+    margin: -5px 0;
+    border-radius: 6px;
+}}
+QSlider::handle:horizontal:hover {{ background: #ffffff; }}
+QSlider::handle:horizontal:disabled {{ background: {TEXT_FAINT}; }}
+QSlider::sub-page:horizontal:disabled {{ background: {BORDER_STRONG}; }}
 
 /* -- splitters and scrollbars ----------------------------------------- */
 
@@ -273,14 +308,18 @@ QLabel#comparisonImage {{
 }}
 
 /* Section headings in side panels, and the tab bar: the display face here
-   ties the chrome to the wordmark without touching body text. */
+   ties the chrome to the wordmark without touching body text.
+
+   Sentence case, not tracked-out caps. A heading that labels a control the
+   user operates should read as a title, not as a filing-cabinet tag; caps
+   plus letter-spacing was applied here AND on QGroupBox::title, so the
+   sidebar carried the same shouted treatment twice. Tracking is kept for
+   the wordmark alone, where five wide capitals genuinely need it. */
 QLabel#panelHeading {{
-    color: {TEXT_MUTED};
+    color: {TEXT};
     font-family: {DISPLAY_STACK};
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
 }}
 
 /* Semantic label roles.
@@ -319,6 +358,92 @@ QLabel#message {{
 QLabel#imageCanvas {{
     background: {IMAGE_BACKGROUND};
     border-radius: 2px;
+}}
+
+/* -- collapsible sidebar sections -------------------------------------- */
+
+/* A section is a header row plus a body. Closed, it is one line; open, the
+   body sits directly under it on the surface colour. Only the OPEN one gets
+   a surface of its own -- a column of identical raised cards is exactly the
+   undifferentiated stack the accordion replaced. */
+
+QFrame#section {{
+    background: transparent;
+    border: none;
+}}
+
+QAbstractButton#sectionHeader {{
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    text-align: left;
+}}
+QAbstractButton#sectionHeader:hover {{ background-color: {SURFACE}; }}
+QAbstractButton#sectionHeader:checked {{
+    background-color: {SURFACE_RAISED};
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+}}
+/* Keyboard focus must be visible, and the hover tint is not enough on its
+   own for someone tabbing through. */
+QAbstractButton#sectionHeader:focus {{
+    background-color: {SURFACE};
+    border: 1px solid {ACCENT};
+}}
+
+QLabel#sectionTitle {{
+    font-family: {DISPLAY_STACK};
+    font-size: 13px;
+    font-weight: 600;
+    color: {TEXT};
+}}
+QAbstractButton#sectionHeader:!checked QLabel#sectionTitle {{
+    color: {TEXT_MUTED};
+}}
+
+/* The closed-state value. Muted, so the column reads as a list of titles
+   first and values second. */
+QLabel#sectionSummary {{
+    font-size: 11px;
+    color: {TEXT_FAINT};
+}}
+/* "This section is changing what you are looking at right now." The accent
+   is the interface's one reserved hue for active state, so an active filter
+   announces itself in the same colour as everything else that is live. */
+QLabel#sectionSummary[badge="on"] {{
+    color: {ACCENT};
+    font-weight: 600;
+}}
+
+QLabel#sectionChevron {{
+    color: {TEXT_FAINT};
+    font-size: 13px;
+}}
+
+/* The open body. Squared off at the top so it reads as continuous with its
+   header rather than as a separate card. */
+QWidget#sectionBody {{
+    background-color: {SURFACE_RAISED};
+    border-bottom-left-radius: 6px;
+    border-bottom-right-radius: 6px;
+}}
+
+/* Inside a section body the group-box chrome is redundant -- the section IS
+   the grouping. This flattens the nested boxes (the t-SNE panel's four) to
+   plain labelled blocks. */
+QWidget#sectionBody QGroupBox {{
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    margin-top: 10px;
+    padding-top: 2px;
+}}
+QWidget#sectionBody QGroupBox::title {{
+    color: {TEXT_MUTED};
+    font-size: 12px;
+    font-weight: 600;
 }}
 
 QTabBar::tab {{
