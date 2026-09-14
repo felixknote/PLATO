@@ -127,8 +127,29 @@ class EmbeddingEntry:
             parts.append("descriptors computed from images")
         elif self.source == SOURCE_JOINT:
             names = self.info.get("source_names", [])
+            counts = self.info.get("source_counts", [])
             if names:
-                parts.append(f"combining {', '.join(names)}")
+                # With counts where they are known: two arms of a joint fit
+                # almost never have the same number of points, and the bigger
+                # one looks denser for that reason alone. An entry reopened
+                # tomorrow should say so without having to be recombined.
+                if counts and len(counts) == len(names):
+                    joined = ", ".join(
+                        f"{n} ({c:,})" for n, c in zip(names, counts)
+                    )
+                else:
+                    joined = ", ".join(names)
+                parts.append(f"combining {joined}")
+            align = str(self.info.get("align", "") or "")
+            if align and align != "none":
+                # Never silent: an aligned fit is a different picture, and
+                # which one you are looking at has to survive coming back
+                # to it later.
+                parts.append(
+                    "centred per dataset"
+                    if align == "centre"
+                    else "centred and scaled per dataset"
+                )
         return " · ".join(parts)
 
 

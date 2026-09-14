@@ -298,6 +298,7 @@ def make_joint_entry(
         info={
             "source_names": [e.name for e in entries],
             "source_keys": [e.key for e in entries],
+            "source_counts": [e.n_points for e in entries],
             "align": align,
         },
     )

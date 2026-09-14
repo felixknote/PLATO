@@ -64,7 +64,10 @@ FIELD_LABELS = {
     PATHWAY: "Pathway (gene target)",
     ROLE: "Control vs treatment",
     CONTROL_KIND: "Control type",
-    PERTURBATION: "Perturbation (gene or drug)",
+    # NOT "gene or drug" -- that reads as a two-way split, which is
+    # Experiment arm. This is the perturbation's NAME, whichever kind it is,
+    # so CRISPRi and antibiotic points share one field at ~38 values.
+    PERTURBATION: "Perturbation (which gene or drug)",
     **plate_location.FIELD_LABELS,
 }
 

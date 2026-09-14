@@ -79,6 +79,9 @@ def _accept_with(monkeypatch, entries, align="none"):
         def selected_align(self):
             return align
 
+        def selected_aligns(self):
+            return [align]
+
     monkeypatch.setattr(cd, "CombineEmbeddingsDialog", _FakeDialog)
 
 
@@ -101,6 +104,11 @@ def _reject(monkeypatch):
             from plato.data.joint_projection import ALIGN_NONE
 
             return ALIGN_NONE
+
+        def selected_aligns(self):
+            from plato.data.joint_projection import ALIGN_NONE
+
+            return [ALIGN_NONE]
 
     monkeypatch.setattr(cd, "CombineEmbeddingsDialog", _FakeDialog)
 
@@ -302,3 +310,106 @@ def test_an_unaligned_combine_is_unchanged(explorer, monkeypatch):
     joint = explorer.workspace.current
     assert joint.info["align"] == ALIGN_NONE
     assert "centred" not in joint.name
+
+
+# -- working with several datasets at once -------------------------------------
+
+
+def test_the_compare_option_builds_both_fits_at_once(explorer, monkeypatch):
+    """Comparing aligned against raw used to mean combining twice by hand.
+
+    The real use of centring is not "which is right" but "what survives it",
+    which needs both entries present to flick between.
+    """
+    from plato.data.joint_projection import ALIGN_CENTRE, ALIGN_NONE
+    from plato.views import combine_dialog as cd
+
+    a, b = _entry("A", 20, 8), _entry("B", 20, 8)
+    explorer._add_entry(a)
+    explorer._add_entry(b)
+
+    class _Pair:
+        DialogCode = cd.CombineEmbeddingsDialog.DialogCode
+
+        def __init__(self, _entries, parent=None):
+            pass
+
+        def exec(self):
+            return self.DialogCode.Accepted
+
+        def selected_entries(self):
+            return [a, b]
+
+        def selected_align(self):
+            return ALIGN_NONE
+
+        def selected_aligns(self):
+            return [ALIGN_NONE, ALIGN_CENTRE]
+
+    monkeypatch.setattr(cd, "CombineEmbeddingsDialog", _Pair)
+    explorer._combine_embeddings()
+
+    joints = [e for e in explorer.workspace.entries if e.source == SOURCE_JOINT]
+    assert len(joints) == 2
+    assert {e.info["align"] for e in joints} == {ALIGN_NONE, ALIGN_CENTRE}
+    # The unaligned one is what you land on: it is the normal view.
+    assert explorer.workspace.current.info["align"] == ALIGN_NONE
+
+
+def test_cycling_moves_between_open_embeddings(explorer):
+    """Ctrl+Tab. Holding one layout in your eye while flicking to the other
+    is how you see what moved; clicking a row each way breaks the rhythm."""
+    a, b = _entry("A", 20, 8), _entry("B", 20, 8)
+    explorer._add_entry(a)
+    explorer._add_entry(b)
+    first = explorer._active_key
+
+    explorer._cycle_embedding(1)
+    assert explorer._active_key != first
+    # Wraps, so two entries are a toggle.
+    explorer._cycle_embedding(1)
+    assert explorer._active_key == first
+
+
+def test_cycling_backwards_is_the_inverse(explorer):
+    a, b, c = _entry("A", 20, 8), _entry("B", 20, 8), _entry("C", 20, 8)
+    for entry in (a, b, c):
+        explorer._add_entry(entry)
+    start = explorer._active_key
+    explorer._cycle_embedding(1)
+    explorer._cycle_embedding(-1)
+    assert explorer._active_key == start
+
+
+def test_cycling_with_one_embedding_does_nothing(explorer):
+    """Not an error, and not a switch to itself that would clear state."""
+    explorer._add_entry(_entry("A", 20, 8))
+    only = explorer._active_key
+    explorer._cycle_embedding(1)
+    assert explorer._active_key == only
+
+
+def test_a_joint_entry_describes_what_went_into_it(explorer, monkeypatch):
+    """An entry reopened later must say its sources, their sizes and whether
+    it was aligned -- otherwise two joint entries are indistinguishable."""
+    from plato.data.joint_projection import ALIGN_CENTRE
+
+    a, b = _entry("CRISPRi", 120, 8), _entry("ABx", 90, 8)
+    explorer._add_entry(a)
+    explorer._add_entry(b)
+    _accept_with(monkeypatch, [a, b], align=ALIGN_CENTRE)
+    explorer._combine_embeddings()
+
+    text = explorer.workspace.current.describe()
+    assert "CRISPRi (120)" in text
+    assert "ABx (90)" in text
+    assert "centred" in text
+
+
+def test_an_unaligned_joint_entry_does_not_claim_alignment(explorer, monkeypatch):
+    a, b = _entry("A", 20, 8), _entry("B", 20, 8)
+    explorer._add_entry(a)
+    explorer._add_entry(b)
+    _accept_with(monkeypatch, [a, b])
+    explorer._combine_embeddings()
+    assert "centred" not in explorer.workspace.current.describe()

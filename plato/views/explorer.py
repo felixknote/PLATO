@@ -13,6 +13,7 @@ re-draw the same coordinates, which is what keeps exploration fluid.
 
 from __future__ import annotations
 
+import collections
 import os
 import re
 from datetime import datetime
@@ -21,6 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -107,7 +109,7 @@ from ..data.projection import (
 )
 from ..gui.theme import BORDER, SURFACE, TEXT, TEXT_FAINT, TEXT_MUTED
 from ..gui.viewer import ImageWindow
-from . import palettes, shapes
+from . import palette, palettes, shapes
 from .palette import (
     UNKNOWN_COLOUR,
     colours_for,
@@ -125,9 +127,21 @@ from .scatter import BACKGROUND_CHOICES, EmbeddingScatter
 from .group_dialog import GroupDialog
 from .section import Accordion
 
-# Legend gets unreadable long before this; past it, colour still encodes the
-# grouping but the legend is replaced by a count.
-MAX_LEGEND_ENTRIES = 24
+# Up to this many legend entries also carry their point count. Beyond it the
+# numbers make the legend too wide to sit over the plot, and the per-entry
+# count matters most exactly where there are few entries -- the arms of a
+# joint fit, a handful of plates -- which is where imbalance is invisible
+# and changes how cluster density reads.
+LEGEND_COUNT_LIMIT = 12
+
+# Hard ceiling on legend rows, whatever the palette. Past this the legend is
+# taller than the plot and stops being readable at all.
+#
+# It is deliberately NOT the thing that usually decides: the real limit is the
+# palette, which has 8-20 colours depending on which is active. Beyond that
+# colours repeat, so two different values share one swatch and a legend would
+# claim a distinction the plot cannot make. See _legend_limit.
+MAX_LEGEND_ENTRIES = 40
 
 COMPUTED_FROM_PLATES = "<loaded-plates>"
 
@@ -602,6 +616,21 @@ class EmbeddingExplorer(QWidget):
         )
         self.combine_button.clicked.connect(self._combine_embeddings)
         self.combine_button.hide()
+        # The primary action of the Data section once more than one embedding
+        # is open: combining is the ONLY way several datasets' positions mean
+        # the same thing, and it was a plain button below a list.
+        self.combine_button.setObjectName("primaryButton")
+
+        # Switching between open embeddings is already instant -- each entry
+        # keeps its own computed projection (see _switch_to), so coming back
+        # restores the exact view rather than recomputing. What was missing
+        # was a way to do it without aiming at a row: comparing two layouts
+        # means going back and forth repeatedly, and a keystroke makes that
+        # a flick rather than a click each way.
+        cycle = QShortcut(QKeySequence("Ctrl+Tab"), self)
+        cycle.activated.connect(lambda: self._cycle_embedding(1))
+        back = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
+        back.activated.connect(lambda: self._cycle_embedding(-1))
 
         source_row.addWidget(self.dataset_box)
         source_row.addWidget(browse)
@@ -2277,9 +2306,33 @@ class EmbeddingExplorer(QWidget):
             for colour, parts in collected.items()
         }
 
+        # A legend is honest only while every value has its own colour. Past
+        # the palette's length colours wrap, so two values share a swatch and
+        # a legend would assert a distinction the plot cannot show -- worse
+        # than no legend, because it looks authoritative. Below that it is
+        # shown even at 30-odd entries: "Gene vs drug" lands around 38 values
+        # and used to lose its legend entirely at a flat cap of 24, with
+        # nothing on screen saying a legend existed and was withheld.
+        limit = self._legend_limit()
         legend_entries = None
-        if self.legend_box.isChecked() and len(ordered) <= MAX_LEGEND_ENTRIES:
-            legend_entries = [(v or "(blank)", mapping[v]) for v in ordered]
+        if self.legend_box.isChecked() and len(ordered) <= limit:
+            # Counts, not just names. Two arms of a joint fit almost never
+            # have the same number of points, and the bigger one looks denser
+            # for that reason alone -- so "this cluster is tighter" is not
+            # readable from the picture unless the legend says how many went
+            # into each. Only where it fits: at 20 entries the numbers make
+            # the legend too wide to sit over the plot.
+            counts = collections.Counter(values.tolist())
+            show_counts = len(ordered) <= LEGEND_COUNT_LIMIT
+            legend_entries = [
+                (
+                    f"{v or '(blank)'}  ({counts.get(v, 0):,})"
+                    if show_counts
+                    else (v or "(blank)"),
+                    mapping[v],
+                )
+                for v in ordered
+            ]
 
         # Per-point colours as well as the grouped masks: the single plot uses
         # the groups (one draw call each), while a facet needs to pick out the
@@ -2296,10 +2349,34 @@ class EmbeddingExplorer(QWidget):
         )
 
         label = field_label(column) if column else ""
-        extra = "" if len(ordered) <= MAX_LEGEND_ENTRIES else f" · {len(ordered)} values"
+        # Say WHY there is no legend, not just how many values there are. A
+        # bare count reads as "too many to list"; the actual problem is that
+        # the colours stopped being unique, which changes how the plot should
+        # be read -- two clusters in the same colour may be unrelated.
+        extra = ""
+        if len(ordered) > limit:
+            palette_size = len(palette.active_categorical())
+            if len(ordered) > palette_size:
+                extra = (
+                    f" · {len(ordered)} values, more than the {palette_size}"
+                    " palette colours — colours repeat"
+                )
+            else:
+                extra = f" · {len(ordered)} values, too many to list"
         self.count_label.setText(
             f"<b>{len(coords):,}</b> of {len(rows):,} points · {label}{extra}"
         )
+
+    def _legend_limit(self) -> int:
+        """How many legend entries are worth drawing right now.
+
+        The active palette's length, capped: a legend is only truthful while
+        each value has its own colour, and which palette is active changes
+        that number (Okabe-Ito has 8, PLATO's own has 20). Reading it live
+        rather than fixing a constant means switching palette updates the
+        legend instead of leaving a stale promise.
+        """
+        return min(MAX_LEGEND_ENTRIES, len(palette.active_categorical()))
 
     def _draw_continuous(self, coords, visible, values, rows, reset_view: bool) -> None:
         """Colour points by a measured statistic, on a continuous ramp.
@@ -2565,6 +2642,24 @@ class EmbeddingExplorer(QWidget):
         self.open_list.set_entries(entries, self.workspace.current_key)
         self.combine_button.setVisible(len(entries) > 1)
 
+    def _cycle_embedding(self, step: int) -> None:
+        """Move to the next or previous open embedding.
+
+        Wraps, so two embeddings become a toggle -- which is the case this
+        exists for: holding one layout in your eye while flicking to the
+        other is how you see what actually moved, and clicking a row each way
+        breaks that rhythm.
+        """
+        entries = self.workspace.entries
+        if len(entries) < 2:
+            return
+        keys = [e.key for e in entries]
+        try:
+            index = keys.index(self._active_key)
+        except ValueError:
+            index = 0
+        self._switch_to(keys[(index + step) % len(keys)])
+
     def _close_embedding(self, key: str) -> None:
         """Close one open embedding by key, from its row's own close button.
 
@@ -2697,12 +2792,17 @@ class EmbeddingExplorer(QWidget):
         chosen = dialog.selected_entries()
         if len(chosen) < 2:
             return
-        align = dialog.selected_align()
+        # Usually one alignment; two when the compare box is ticked, so the
+        # raw and centred fits can be flicked between rather than combined
+        # twice by hand.
+        aligns = dialog.selected_aligns()
+        align = aligns[0]
 
         from ..data.joint_projection import IncompatibleEmbeddings, make_joint_entry
 
         try:
-            entry = make_joint_entry(chosen, align=align)
+            entries_made = [make_joint_entry(chosen, align=a) for a in aligns]
+            entry = entries_made[0]
         except IncompatibleEmbeddings as exc:
             QMessageBox.warning(self, "Combine embeddings", str(exc))
             return
@@ -2719,6 +2819,11 @@ class EmbeddingExplorer(QWidget):
             )
             return
 
+        # The comparison partner is added first so it exists in the list,
+        # then the primary one is added and switched to -- so Ctrl+Tab from
+        # here lands on the counterpart rather than on an unrelated export.
+        for extra in entries_made[1:]:
+            self._add_entry(extra)
         self._add_entry(entry)
         # _switch_to directly, not setCurrentIndex: _add_entry -> Workspace.add
         # already made the joint entry current and _sync_open_box already
@@ -2744,9 +2849,14 @@ class EmbeddingExplorer(QWidget):
         from ..data.joint_projection import ALIGN_NONE as _ALIGN_NONE
 
         aligned = "" if align == _ALIGN_NONE else f", {align}-aligned"
+        pair = (
+            " · a centred copy was added too — Ctrl+Tab to compare"
+            if len(entries_made) > 1
+            else ""
+        )
         self.status.emit(
             f"combined {len(chosen)} embeddings into {entry.n_points:,} points"
-            f"{aligned} -- press Compute projection"
+            f"{aligned} -- press Compute projection{pair}"
         )
 
     def _on_tsne_changed(self) -> None:

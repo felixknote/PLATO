@@ -111,6 +111,20 @@ class CombineEmbeddingsDialog(QDialog):
             self._align_group.addButton(button, index)
             align_box.addWidget(button)
 
+        # The comparison is the real use of centring: not "which one is
+        # right" but "what survives it". Building both at once and flicking
+        # between them (Ctrl+Tab) is how you see what actually moved --
+        # otherwise it means combining twice, by hand, and remembering which
+        # entry was which.
+        self.also_centred = QCheckBox("Also build a centred copy to compare")
+        self.also_centred.setToolTip(
+            "Creates two entries from one combine: the raw fit and a centred "
+            "one. Switch between them with Ctrl+Tab -- structure that stays "
+            "put was not the between-dataset offset."
+        )
+        self.also_centred.toggled.connect(self._revalidate)
+        align_box.addWidget(self.also_centred)
+
         self.status_label = QLabel("Choose at least two embeddings.")
         self.status_label.setWordWrap(True)
         self.status_label.setObjectName("hint")
@@ -156,10 +170,13 @@ class CombineEmbeddingsDialog(QDialog):
             ok_button.setEnabled(False)
             return
         total = sum(e.n_points for e in chosen)
-        self.status_label.setText(
+        text = (
             f"{len(chosen)} embeddings, {total:,} points total. All share "
             f"{chosen[0].n_dimensions} dimensions -- compatible."
         )
+        if self.also_centred.isChecked():
+            text += " Two entries will be created, to compare."
+        self.status_label.setText(text)
         ok_button.setEnabled(True)
 
     def selected_entries(self) -> list[EmbeddingEntry]:
@@ -171,3 +188,16 @@ class CombineEmbeddingsDialog(QDialog):
         if 0 <= index < len(self._align_modes):
             return self._align_modes[index]
         return ALIGN_NONE
+
+    def selected_aligns(self) -> list[str]:
+        """Every alignment to build, in the order the entries should appear.
+
+        Usually one. With the compare box ticked it is the chosen mode plus a
+        centred counterpart, so the pair can be flicked between rather than
+        combined twice by hand.
+        """
+        chosen = self.selected_align()
+        if not self.also_centred.isChecked():
+            return [chosen]
+        partner = ALIGN_CENTRE if chosen == ALIGN_NONE else ALIGN_NONE
+        return [chosen, partner]

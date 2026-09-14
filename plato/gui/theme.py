@@ -120,6 +120,25 @@ QPushButton:default {{
 }}
 QPushButton:default:hover {{ background-color: {ACCENT_HOVER}; }}
 
+/* The one action a panel exists for, when it is not the dialog default.
+   "Combine..." is the only way several datasets' positions mean the same
+   thing, and it sat as a plain button below a list, indistinguishable from
+   "Browse..." above it. Same treatment as :default so there is one visual
+   vocabulary for "this is the action", not two. */
+QPushButton#primaryButton {{
+    background-color: {ACCENT};
+    border-color: {ACCENT};
+    color: #ffffff;
+    font-weight: 600;
+}}
+QPushButton#primaryButton:hover {{ background-color: {ACCENT_HOVER}; }}
+QPushButton#primaryButton:pressed {{ background-color: {ACCENT_PRESSED}; }}
+QPushButton#primaryButton:disabled {{
+    background-color: {SURFACE};
+    color: {TEXT_FAINT};
+    border-color: {BORDER};
+}}
+
 /* -- text entry and combos ------------------------------------------- */
 
 QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox {{
