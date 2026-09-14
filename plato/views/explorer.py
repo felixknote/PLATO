@@ -184,6 +184,70 @@ def _suggested_export_name(
     return "_".join(parts) + f".{fmt}"
 
 
+# How many matching roots to collect before deciding between them. Two was
+# enough while a dataset always came from one screen; a joint entry combining
+# three screens needs its images from all three -- see _choose_resolver.
+_MAX_ROOTS_TRIED = 4
+
+# Below this sampled coverage, a root is treated as holding PART of the
+# dataset rather than as one of several equally-good candidates for the whole
+# of it.
+_PARTIAL_COVERAGE = 0.95
+
+
+def _choose_resolver(matches, frame):
+    """Pick one resolver from the roots that matched, or merge several.
+
+    Two different situations produce more than one match, and they want
+    opposite handling:
+
+    **Ambiguity.** Screens share a filename convention -- NIS writes
+    ``WellA01_PointA01_0000_Channel....tiff`` for every plate of every
+    experiment -- so several unrelated roots resolve the SAME rows equally
+    well. Only one can be right, no heuristic can say which, so the first is
+    used and the rest are reported as a guess.
+
+    **Partial coverage.** A joint entry's rows come from several screens at
+    once (see plato.data.joint_projection), and so do the images: the CRISPRi
+    root holds half of them and the ABx root the other half. Here the roots
+    are complementary, not competing, and picking the first silently loses
+    every image belonging to the other arms -- with no error, because the
+    chosen root resolves its own half perfectly. Measured on a real two-arm
+    joint entry: 30/60 rows resolved from either arm's root alone, 60/60 from
+    the two merged.
+
+    They are told apart by coverage: a root that resolves nearly every sampled
+    row is a candidate for the whole dataset, and one that does not is a piece
+    of it. ImageResolver.combined_with does the merging.
+    """
+    if not matches:
+        return None, []
+
+    full = [r for r in matches if r.report and r.report.fraction >= _PARTIAL_COVERAGE]
+    if full:
+        # At least one root covers the dataset on its own. Any others are
+        # rival answers to the same question, not missing pieces.
+        return full[0], [str(r.root) for r in matches if r is not full[0]]
+
+    # Nothing covers it alone. Merge, keeping only the roots that actually add
+    # coverage, so an unrelated screen that happens to match a few filenames
+    # does not get folded in.
+    merged = matches[0]
+    used = [merged]
+    for candidate in matches[1:]:
+        combined = merged.combined_with(candidate, frame)
+        before = merged.report.fraction if merged.report else 0.0
+        after = combined.report.fraction if combined.report else 0.0
+        if after > before:
+            merged = combined
+            used.append(candidate)
+        if merged.report and merged.report.fraction >= _PARTIAL_COVERAGE:
+            break
+    # Merged roots are not a guess -- they are all in use -- so nothing here
+    # is reported as ambiguous.
+    return merged, [str(r.root) for r in matches if r not in used]
+
+
 def export_headline(
     *,
     dataset: str | None,
@@ -346,18 +410,23 @@ class _ResolveTask(QRunnable):
 
     def run(self) -> None:  # pragma: no cover - worker thread
         matches = []
+        chosen, others = None, []
         try:
             for candidate in self._candidates:
                 resolver = ImageResolver.detect(candidate, self._frame)
                 if resolver is not None:
                     matches.append(resolver)
-                    if len(matches) >= 2:
+                    if len(matches) >= _MAX_ROOTS_TRIED:
                         break
+            # Same rule as the synchronous path -- merge complementary roots,
+            # report competing ones. A joint entry's images live under several
+            # screens at once, and taking the first match loses the rest.
+            chosen, others = _choose_resolver(matches, self._frame)
         except Exception:  # noqa: BLE001 - a bad share must not kill the task
-            matches = []
+            chosen, others = None, []
         try:
-            self._signals.ambiguous.emit(self._key, [str(r.root) for r in matches[1:]])
-            self._signals.found.emit(self._key, matches[0] if matches else None)
+            self._signals.ambiguous.emit(self._key, others)
+            self._signals.found.emit(self._key, chosen)
         except RuntimeError:
             pass
 
@@ -1678,6 +1747,9 @@ class EmbeddingExplorer(QWidget):
         first is used and ``ambiguous_roots`` records the rest, so the UI can
         say the choice was a guess instead of quietly showing images from the
         wrong screen.
+
+        A partial match is the other case, and it is not ambiguity -- see
+        ``_choose_resolver``.
         """
         key = str(self.dataset.directory) if self.dataset is not None else ""
         if key and key in self._resolver_cache:
@@ -1689,13 +1761,10 @@ class EmbeddingExplorer(QWidget):
             resolver = ImageResolver.detect(candidate, frame)
             if resolver is not None:
                 matches.append(resolver)
-                # Two is enough to know it is ambiguous; scanning the whole
-                # library to count them all costs more than the answer is worth.
-                if len(matches) >= 2:
+                if len(matches) >= _MAX_ROOTS_TRIED:
                     break
 
-        chosen = matches[0] if matches else None
-        self.ambiguous_roots = [str(r.root) for r in matches[1:]]
+        chosen, self.ambiguous_roots = _choose_resolver(matches, frame)
         if key:
             self._resolver_cache[key] = (chosen, self.ambiguous_roots)
         return chosen
