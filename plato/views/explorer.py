@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -85,6 +86,7 @@ from ..data.explorer_model import (
     filter_fields,
 )
 from ..data import plate_location
+from ..data import controls as controls_data
 from ..data.custom_groups import GroupingStore, is_derived, source_of
 from ..data.index.db import ImageRow
 from ..data.locations import (
@@ -511,6 +513,10 @@ class EmbeddingExplorer(QWidget):
         # User-defined classes over a column's values. Applied to the frame
         # as derived columns, so faceting/colouring never see a special case.
         self.groupings = GroupingStore()
+        # Which values are controls. Empty until "Mark controls…" confirms a
+        # detection; see data/controls.py for why they become classes in
+        # every encoding rather than one more field.
+        self.controls = controls_data.ControlMarking(source="")
         # Set once the user picks a categorical palette themselves, so a
         # background change (which otherwise suggests the palette suited to
         # the new ground -- see _on_background_changed) never overrides a
@@ -787,6 +793,19 @@ class EmbeddingExplorer(QWidget):
         )
         self.group_edit_button.clicked.connect(self._edit_custom_groups)
 
+        # Controls are the reference every other point is judged against, so
+        # the question asked of them is the same whatever field is on screen.
+        # Marking them puts them into every encoding at once rather than
+        # making them findable only when colouring by one particular column.
+        self.controls_button = QPushButton("Mark controls…")
+        self.controls_button.setToolTip(
+            "Say which wells are controls. Starts from what the condition "
+            "parser recognised, so it usually just needs confirming.\n"
+            "Marked controls appear as their own classes in EVERY colour-by, "
+            "and are drawn so they stay visible inside a dense cluster."
+        )
+        self.controls_button.clicked.connect(self._edit_controls)
+
         self.shared_axes_box = QCheckBox("Shared axes")
         self.shared_axes_box.setChecked(True)
         self.shared_axes_box.setToolTip(
@@ -888,6 +907,7 @@ class EmbeddingExplorer(QWidget):
         encoding_form = QFormLayout()
         encoding_form.setContentsMargins(6, 4, 6, 4)
         encoding_form.addRow("Colour by", self.colour_box)
+        encoding_form.addRow("", self.controls_button)
         encoding_form.addRow("Palette", self.palette_box)
         encoding_form.addRow("Shape by", self.shape_box)
         encoding_form.addRow(self.shape_hint)
@@ -1569,6 +1589,10 @@ class EmbeddingExplorer(QWidget):
         # whichever frame is live, and a grouping over a column this dataset
         # does not have is simply skipped.
         self.groupings.apply_all(self.frame)
+        # Controls too: the marking belongs to the workspace, the columns to
+        # whichever frame is live. A marking whose source column this dataset
+        # lacks simply marks nothing.
+        self._apply_controls()
 
         self.metadata_panel.set_frame(self.frame)
         self._rebuild_group_options()
@@ -1824,6 +1848,16 @@ class EmbeddingExplorer(QWidget):
         for column in self.groupings.labels():
             if column in self.frame.columns and self.colour_box.findData(column) < 0:
                 self.colour_box.addItem(self._group_label(column), column)
+        # Controls as a field in their own right, alongside the overlay that
+        # puts them into every OTHER field: "where do the controls sit" is
+        # often the whole question, and answering it should not mean picking
+        # some unrelated encoding first.
+        if self.controls and controls_data.CONTROL_FIELD in self.frame.columns:
+            if self.colour_box.findData(controls_data.CONTROL_FIELD) < 0:
+                self.colour_box.addItem(
+                    controls_data.FIELD_LABELS[controls_data.CONTROL_FIELD],
+                    controls_data.CONTROL_FIELD,
+                )
         # Prefer a field that says something biological on first open.
         if current is not None:
             index = self.colour_box.findData(current)
@@ -2111,6 +2145,36 @@ class EmbeddingExplorer(QWidget):
         accordion.set_summary("filters", f"{active} active" if active else "")
         accordion.set_badge("filters", bool(active))
 
+    def _encoded_column(self, column: str) -> pd.Series:
+        """A column as it should be ENCODED, with marked controls overlaid.
+
+        This is the whole of "controls show up as additional classes in all
+        display options". A control row reports its control class instead of
+        its ordinary value, so colouring by gene shows one "WT (non-targeting
+        gRNA)" entry rather than scattering the controls through fifty gene
+        names -- and the same is true of every other field, without any of
+        them knowing about it.
+
+        The control fields themselves are left alone: overlaying a control
+        class onto the control column would be circular.
+        """
+        raw = self.frame[column].astype(str)
+        # getattr, not self.controls: _colour_universe is deliberately usable
+        # on a bare instance (see tests/test_colour_stability.py, which builds
+        # one with __new__ to test the mapping without a QApplication), so
+        # this must not require full construction.
+        marking = getattr(self, "controls", None)
+        if not marking:
+            return raw
+        if column in (controls_data.CONTROL_CLASS, controls_data.CONTROL_FIELD):
+            return raw
+        if column == marking.source:
+            # The column the marking is written against. Its own values ARE
+            # the control names, so replacing them would relabel the thing
+            # being defined.
+            return raw
+        return marking.overlay(raw, self.frame)
+
     def _colour_universe(self, column: str | None) -> list[str]:
         """Every value ``column`` takes across the whole frame, unknowns last.
 
@@ -2124,14 +2188,14 @@ class EmbeddingExplorer(QWidget):
         """
         if not column or self.frame is None or column not in self.frame.columns:
             return []
-        raw = self.frame[column].astype(str)
+        raw = self._encoded_column(column)
         # distinct_values sorts plain-alphabetically and only excludes "" --
         # other unknown markers ("nan", "unknown", the MoA/pathway sentinel)
         # are real strings to it and would land wherever they alphabetise to.
         # Pulled out here and appended last instead, so every unknown-marker
         # value shares one grey slot at the end rather than scattering through
         # the real categories.
-        known = [v for v in distinct_values(self.frame, column) if not is_unknown(v)]
+        known = sorted({v for v in raw if v.strip() and not is_unknown(v)})
         unknowns = sorted({v for v in raw if is_unknown(v)})
         return known + unknowns
 
@@ -2173,7 +2237,11 @@ class EmbeddingExplorer(QWidget):
             return
 
         column = self.colour_box.currentData()
-        values = subset[column].astype(str).to_numpy()[mask] if column else np.array([""] * len(coords))
+        values = (
+            self._encoded_column(column).to_numpy()[rows][mask]
+            if column
+            else np.array([""] * len(coords))
+        )
         # The colour->value mapping is built from every value the FULL frame
         # carries for this column, not just what happens to be on screen after
         # filtering. Deriving it from the visible subset would reassign
@@ -2310,6 +2378,21 @@ class EmbeddingExplorer(QWidget):
             f"{low:,.0f}–{high:,.0f}{note}"
         )
 
+    def _emphasis_for(self, visible):
+        """Boolean mask of visible points to draw on top, or None.
+
+        Marked controls. A control is the reference every other point is
+        judged against, and at 3 px inside a cluster of 30,000 it cannot be
+        found however it is coloured -- so it is drawn larger, ringed, and
+        last. It keeps its category colour: emphasis says "look here", not
+        "this is a different thing".
+        """
+        if not self.controls or self.frame is None:
+            return None
+        mask = self.controls.mask(self.frame).to_numpy()
+        marked = mask[visible]
+        return marked if marked.any() else None
+
     def _draw(
         self,
         coords,
@@ -2327,6 +2410,7 @@ class EmbeddingExplorer(QWidget):
         facet can never disagree with the single plot about how a point looks.
         """
         symbols = self._symbols_for(visible)
+        emphasise = self._emphasis_for(visible)
         faceting = bool(self._group_column) and self.frame is not None
 
         self.scatter.setVisible(not faceting)
@@ -2346,6 +2430,7 @@ class EmbeddingExplorer(QWidget):
                 point_size=self.size_slider.value(),
                 opacity=self.opacity_slider.value() / 100.0,
                 symbols=symbols,
+                emphasise=emphasise,
                 legend_entries=legend_entries,
                 reset_view=reset_view,
             )
@@ -2536,6 +2621,10 @@ class EmbeddingExplorer(QWidget):
         # to whichever frame is live, so switching datasets has to rebuild
         # them; a grouping over a column this dataset lacks is skipped.
         self.groupings.apply_all(self.frame)
+        # Controls too, for the same reason: the marking belongs to the
+        # workspace, the derived columns to whichever frame is live. A
+        # marking whose source column this dataset lacks marks nothing.
+        self._apply_controls()
 
         self.metadata_panel.set_frame(self.frame)
         self._rebuild_group_options()
@@ -2786,6 +2875,85 @@ class EmbeddingExplorer(QWidget):
         # box no longer shows.
         if self.shape_box.currentData() != previous:
             self.schedule_redraw()
+
+    def _edit_controls(self) -> None:
+        """Confirm which values are controls, starting from the parser's guess.
+
+        Not silent: annotations.CONTROL_LABELS is a dictionary of names this
+        lab has used, so a screen naming its controls anything else detects
+        nothing and would have no way to say so. Showing the guess makes
+        both the hit and the miss visible.
+        """
+        if self.frame is None:
+            QMessageBox.information(self, "Mark controls", "Load a dataset first.")
+            return
+
+        # Columns worth marking against: the ones that say what was in a
+        # well. Plate geometry and derived groupings are excluded -- a
+        # control is a treatment, not a location.
+        candidates: list[tuple[str, str]] = []
+        for column in colour_fields(self.frame):
+            if is_derived(column) or column.startswith("plate_"):
+                continue
+            if column in (controls_data.CONTROL_CLASS, controls_data.CONTROL_FIELD):
+                continue
+            if len(distinct_values(self.frame, column)) > 1:
+                candidates.append((column, field_label(column)))
+        if not candidates:
+            QMessageBox.information(
+                self, "Mark controls", "This dataset has no field to mark against."
+            )
+            return
+
+        detected = controls_data.detect(self.frame)
+        # Detection is keyed on the condition label; offer that column first
+        # when it is the one the guess is about, so the dialog opens showing
+        # the guess rather than an unrelated column with nothing ticked.
+        if detected:
+            for index, (column, _) in enumerate(candidates):
+                if column == CONDITION:
+                    candidates.insert(0, candidates.pop(index))
+                    break
+
+        from .control_dialog import ControlDialog
+
+        dialog = ControlDialog(
+            candidates,
+            lambda column: distinct_values(self.frame, column),
+            detected,
+            existing=self.controls if self.controls else None,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        had = bool(self.controls)
+        self.controls = dialog.marking()
+        self._apply_controls()
+        self._rebuild_colour_options()
+        self._rebuild_filters()
+
+        if not self.controls:
+            if had:
+                self.status.emit("controls unmarked")
+            self.schedule_redraw()
+            return
+        self.status.emit(
+            f"marked {len(self.controls.assignments)} values as "
+            f"{len(self.controls.classes())} control class(es)"
+        )
+        self.schedule_redraw()
+
+    def _apply_controls(self) -> None:
+        """Materialise (or clear) the control columns on the current frame."""
+        if self.frame is None:
+            return
+        if self.controls:
+            self.controls.apply(self.frame)
+            return
+        for column in (controls_data.CONTROL_CLASS, controls_data.CONTROL_FIELD):
+            if column in self.frame.columns:
+                self.frame.drop(columns=[column], inplace=True)
 
     def _edit_custom_groups(self) -> None:
         """Define named classes over the currently selected grouping column.

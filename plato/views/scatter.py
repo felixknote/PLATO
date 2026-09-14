@@ -398,6 +398,7 @@ class EmbeddingScatter(QWidget):
         opacity: float = 0.85,
         symbols: list[str] | None = None,
         legend_entries: list[tuple[str, str]] | None = None,
+        emphasise: np.ndarray | None = None,
         reset_view: bool = True,
     ) -> None:
         """Draw ``coords``, coloured per point, batched by colour group.
@@ -408,6 +409,10 @@ class EmbeddingScatter(QWidget):
             colours: hex colour per point.
             groups: optional colour -> positional mask, to skip regrouping.
             legend_entries: (label, colour) pairs; None hides the legend.
+            emphasise: boolean mask of points to draw larger, outlined and on
+                top. Marked controls use this: a control is the reference
+                every other point is judged against, and at 3 px inside a
+                cluster of 30,000 it is invisible whatever colour it is.
         """
         self._clear_items()
         self._coords = np.ascontiguousarray(coords, dtype=np.float32)
@@ -418,6 +423,9 @@ class EmbeddingScatter(QWidget):
         self._point_size = point_size
         self._opacity = opacity
         self._symbols = list(symbols) if symbols else None
+        self._emphasise = (
+            np.asarray(emphasise, dtype=bool) if emphasise is not None else None
+        )
 
         # Grey-out is applied to the colours before grouping, so the greyed
         # points collapse into ONE draw call rather than staying spread across
@@ -477,6 +485,44 @@ class EmbeddingScatter(QWidget):
             item.setZValue(0)
             self.plot.addItem(item)
             self._items.append(item)
+
+        # Emphasised points, drawn last so they sit above the bulk. A second
+        # pass over the SAME points rather than a change to their batch: the
+        # mark keeps its category colour (a control is still whatever it is
+        # coloured by) and gains a bright ring and a larger size, so it can be
+        # found without being recoloured into something it is not.
+        emphasised = getattr(self, "_emphasise", None)
+        if emphasised is not None and emphasised.any():
+            marked = np.flatnonzero(emphasised[: len(self._coords)])
+            if len(marked):
+                # The reserved flag hue, not SELECTION_COLOUR. Amber already
+                # means "selected", so ringing controls in it says two things
+                # at once -- and against an amber category the ring vanishes
+                # into its own points. Magenta is held out of every
+                # categorical palette (see views/palettes.py and the chrome
+                # hue tests), so it cannot collide with a data colour.
+                from ..gui import themes as _themes
+
+                ring = QColor(_themes.current().flag)
+                for colour in dict.fromkeys(self._colours[i] for i in marked):
+                    mask = np.asarray(
+                        [i for i in marked if self._colours[i] == colour]
+                    )
+                    brush = QColor(colour)
+                    brush.setAlpha(255)
+                    item = pg.ScatterPlotItem(
+                        x=self._coords[mask, 0],
+                        y=self._coords[mask, 1],
+                        size=point_size + 3,
+                        symbol="o",
+                        brush=pg.mkBrush(brush),
+                        pen=pg.mkPen(ring, width=1.5),
+                        hoverable=False,
+                    )
+                    # Below the selection rings, above every ordinary point.
+                    item.setZValue(1)
+                    self.plot.addItem(item)
+                    self._items.append(item)
 
         # Selection is kept across a redraw: filtering or recolouring must not
         # silently discard a cluster the user has just chosen. It is stored in
@@ -766,6 +812,7 @@ class EmbeddingScatter(QWidget):
             point_size=getattr(self, "_point_size", 6),
             opacity=getattr(self, "_opacity", 0.85),
             symbols=getattr(self, "_symbols", None),
+            emphasise=getattr(self, "_emphasise", None),
             legend_entries=None,
             reset_view=False,
         )
