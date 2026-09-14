@@ -525,7 +525,12 @@ class EmbeddingScatter(QWidget):
             panel = QColor(255, 255, 255, 220)
             ink = "#20242b"
         else:
-            panel = QColor(30, 33, 39, 220)
+            # The theme's own raised surface, not a hand-picked grey. The
+            # literal (30, 33, 39) here was neutral grey while everything
+            # around it is navy, so the legend read as a foreign box sitting
+            # on the plot rather than as part of the same interface.
+            panel = QColor(_themes.current().surface_raised)
+            panel.setAlpha(220)
             ink = _themes.current().text
 
         self.legend = pg.LegendItem(

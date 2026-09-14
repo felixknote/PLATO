@@ -95,7 +95,18 @@ DARK_COLOURS = ThemeColours(
     # Darker than the panel so an image edge reads as an edge, but not black,
     # which makes dark pixels unjudgeable.
     image_background="#05080f",
-    plot_background="#05080f",
+    # NOT the image ground, despite both once being #05080f. An image is a
+    # measurement being judged, so it wants a near-black surround that does
+    # not bias the eye. A scatter plot is a PANEL: it fills the centre of the
+    # window, framed by surface (#111827), and at #05080f it read as a hole
+    # punched through the app rather than part of it -- the darkest thing on
+    # screen by some margin, darker even than the window background.
+    #
+    # Sits just below surface so the plot still reads as its own region with
+    # a real edge, without leaving the navy family the rest of the interface
+    # is built from. Points keep their contrast: every categorical palette is
+    # tuned well above this lightness.
+    plot_background="#0d1420",
 )
 
 LIGHT_COLOURS = ThemeColours(

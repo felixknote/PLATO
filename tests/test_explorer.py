@@ -896,26 +896,44 @@ def test_suggested_geometry_follows_the_vector_kind():
 
 
 def test_suggested_perplexity_stays_usable():
-    """Flat 4, not scaled with n. Contrary to general t-SNE literature
-    guidance (which would suggest perplexity in the hundreds for tens of
-    thousands of points), a direct silhouette-score sweep against a real
-    32,256-point DINO export (54 ground-truth perturbations) found
-    perplexity 3-5 clearly best at BOTH a 5,000-point subsample and the
-    full 32k-point scale -- the low-perplexity result was not a subsampling
-    artefact. See suggest()'s docstring for the full measurement."""
-    from plato.data.projection import suggest
+    """Flat 50, not scaled with n, and never above what openTSNE will take.
+
+    50 follows the general guidance (Kobak & Berens 2019; openTSNE's docs)
+    for datasets of tens of thousands of points. It replaced a measured 4 --
+    see DEFAULT_PERPLEXITY in projection.py for that sweep and why it was
+    set aside. What this test pins is not the number but the property that
+    survives changing it: a SUGGESTED value must never already need the
+    clamp the runner would apply, or the default is one the user has to fix
+    before it will run.
+    """
+    from plato.data.projection import DEFAULT_PERPLEXITY, suggest
 
     for n in (20, 50, 500, 5_000, 50_000):
         perplexity = suggest(n).perplexity
-        assert 2 <= perplexity <= 4
+        assert 2 <= perplexity <= DEFAULT_PERPLEXITY
         # openTSNE needs perplexity < n/3, which the runner also enforces --
         # but a SUGGESTED value should not already need that clamp itself.
         assert perplexity < max(5, n / 3)
 
-    assert suggest(50_000).perplexity == 4
-    # Only a genuinely tiny dataset pulls it below 4.
-    assert suggest(10).perplexity < 4
-    assert suggest(500).perplexity < 200
+    assert suggest(50_000).perplexity == DEFAULT_PERPLEXITY
+    # Only a dataset too small to support it pulls it below the default.
+    assert suggest(10).perplexity < DEFAULT_PERPLEXITY
+    assert suggest(60).perplexity < DEFAULT_PERPLEXITY
+    # ...and a dataset comfortably large enough gets it in full.
+    assert suggest(1_000).perplexity == DEFAULT_PERPLEXITY
+
+
+def test_suggested_iterations_do_not_scale_with_n():
+    """Convergence is a property of the embedding, not the row count.
+
+    The old n/25 formula started at 750 and capped at 1500, so the small
+    case was under-served for no saving worth having. A flat count costs
+    seconds on a small dataset and is what a large one needs anyway.
+    """
+    from plato.data.projection import DEFAULT_TSNE_ITER, suggest
+
+    counts = {suggest(n).n_iter for n in (500, 5_000, 50_000)}
+    assert counts == {DEFAULT_TSNE_ITER}
 
 
 def test_subsampling_only_kicks_in_when_it_has_to():

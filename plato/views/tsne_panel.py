@@ -39,7 +39,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..data.projection import TSNE_PRESETS, tsne_preset
+from ..data.projection import (
+    DEFAULT_PERPLEXITY,
+    DEFAULT_TSNE_EARLY_ITER,
+    DEFAULT_TSNE_ITER,
+    TSNE_PRESETS,
+    tsne_preset,
+)
 from ..gui import themes
 
 CUSTOM = "Custom"
@@ -82,7 +88,7 @@ class TsnePanel(QWidget):
         # legitimately want several thousand iterations.
         self.iterations.setRange(50, 100_000)
         self.iterations.setSingleStep(250)
-        self.iterations.setValue(750)
+        self.iterations.setValue(DEFAULT_TSNE_ITER)
         self.iterations.setToolTip(
             "Gradient-descent steps after early exaggeration.\n"
             "Too few and the layout has not settled. There is no upper limit "
@@ -93,7 +99,7 @@ class TsnePanel(QWidget):
         self.early_iterations = QSpinBox()
         self.early_iterations.setRange(0, 10_000)
         self.early_iterations.setSingleStep(50)
-        self.early_iterations.setValue(250)
+        self.early_iterations.setValue(DEFAULT_TSNE_EARLY_ITER)
         self.early_iterations.setToolTip(
             "Steps spent in the early-exaggeration phase, which lets clusters "
             "separate before fine structure is fitted."
@@ -104,11 +110,11 @@ class TsnePanel(QWidget):
         self.perplexity = QDoubleSpinBox()
         self.perplexity.setRange(2.0, 5000.0)
         self.perplexity.setDecimals(1)
-        # 4, matching suggest()'s own empirically-measured default (see
-        # plato/data/projection.py) -- this construction-time value is only
-        # ever seen before a dataset is loaded and apply_suggested_params
-        # overwrites it via load_from().
-        self.perplexity.setValue(4.0)
+        # Matches suggest()'s own default (see plato/data/projection.py for
+        # why it is 50) -- this construction-time value is only ever seen
+        # before a dataset is loaded and apply_suggested_params overwrites it
+        # via load_from().
+        self.perplexity.setValue(DEFAULT_PERPLEXITY)
         self.perplexity.setToolTip(
             "Roughly, how many neighbours each point is fitted against.\n\n"
             "This changes the answer, so one value is not a result. Low "

@@ -64,6 +64,50 @@ DEFAULT_PCA_COMPONENTS = 50
 
 RANDOM_STATE = 1
 
+# -- t-SNE defaults -----------------------------------------------------------
+#
+# Perplexity 50, raised from a measured 4, because the question changed.
+#
+# PLATO's job at this stage is finding CONFOUNDERS before any model is
+# trained: does a plate column shift the embedding, do edge wells sit apart,
+# do the plates measured on one day cluster together. Frozen DINO features
+# are used precisely because they are not tuned to the biology, so whatever
+# batch structure exists shows up undisguised.
+#
+# That structure is a smooth gradient across a plate, not a tight island. It
+# is the case low perplexity destroys: fitting each point against ~4
+# neighbours chops a column-to-column drift into unrelated sub-blobs, and
+# the artefact you were looking for becomes invisible in the one view meant
+# to reveal it. A neighbourhood of ~50 is large enough that a gradient stays
+# a gradient and a cluster has to be genuinely coherent to survive -- which
+# is also the range the general guidance gives for tens of thousands of
+# points (Kobak & Berens 2019; openTSNE's own docs).
+#
+# The earlier 4 came from a real sweep, and it is worth being precise about
+# what it measured rather than simply overriding it: silhouette against 54
+# ground-truth PERTURBATION labels on the 32,256-point "Aug26 CRISPRi & ABx"
+# export, testing {3, 5, 7, 10, 15, 20}, where 3 and 5 tied best (-0.2107 /
+# -0.2110) ahead of 7 (-0.2275). Every score was negative: the perturbations
+# were not separable in that frozen-DINO space at any perplexity. So the
+# sweep ranked options none of which worked, on a variable that is not the
+# one this stage is looking for. It says nothing about plate geometry.
+#
+# Re-measure if the target changes. Once embeddings are LEARNED on this task
+# and the question becomes "do the conditions separate" rather than "is
+# there a batch effect", the right perplexity is an open question again --
+# and the panel's tooltip says the same to the user: one perplexity is not
+# a result.
+DEFAULT_PERPLEXITY = 50.0
+
+# Flat, not scaled with n -- see suggest() for why.
+DEFAULT_TSNE_ITER = 5000
+# Early exaggeration is the phase that lets clusters separate before fine
+# structure is fitted. Held at 500 rather than scaled up with the main count:
+# it is a separation phase, not a convergence one, and openTSNE's own
+# guidance is that extending it past a few hundred iterations buys nothing
+# once the clusters have pulled apart.
+DEFAULT_TSNE_EARLY_ITER = 500
+
 UMAP = "UMAP"
 TSNE = "t-SNE"
 METHODS = (UMAP, TSNE)
@@ -93,16 +137,16 @@ class ProjectionParams:
     # mean nothing, distances BETWEEN clusters mean little, and both change
     # with perplexity -- so reading one t-SNE at one perplexity is exactly the
     # mistake these controls exist to prevent.
-    perplexity: float = 30.0
+    perplexity: float = DEFAULT_PERPLEXITY
     # Neighbourhood size. Low values fragment real clusters into sub-blobs;
     # high values merge distinct ones. openTSNE requires < n/3, enforced in
     # the runner. Looking at two or three values is the standard advice.
-    n_iter: int = 500
+    n_iter: int = DEFAULT_TSNE_ITER
     # Iterations AFTER early exaggeration. A run that has not converged shows
     # structure that is an artefact of where it stopped -- the classic
     # "pinched" or filament-shaped clusters. 500 is a floor, not a target;
     # 1000-2000 is normal for a converged layout.
-    early_exaggeration_iter: int = 250
+    early_exaggeration_iter: int = DEFAULT_TSNE_EARLY_ITER
     early_exaggeration: float = 12.0
     # Early exaggeration inflates attraction so clusters can separate before
     # fine structure is fitted. Too little and clusters stay entangled; too
@@ -262,9 +306,23 @@ def suggest(n_points: int, *, learned: bool = True) -> ProjectionParams:
     # still respect openTSNE's perplexity < n/3 for a genuinely tiny dataset,
     # which the runner enforces at use time regardless, but a SUGGESTED value
     # that already needs clamping the moment it is shown is not sensible.
-    perplexity = min(4.0, max(2.0, (n_points - 1) / 3.0))
-    n_iter = max(750, min(1500, round(n_points / 25)))
-    early_exaggeration_iter = max(250, min(500, round(n_points / 50)))
+    perplexity = min(DEFAULT_PERPLEXITY, max(2.0, (n_points - 1) / 3.0))
+    # Flat 5,000, not scaled with n. The previous n/25 formula topped out at
+    # 1,500 and started at 750, which is above openTSNE's convergence floor
+    # but well below where these layouts actually stop moving: Belkina et al.
+    # (2019) measured default iteration counts costing >30 points of 1-NN
+    # accuracy against a properly converged run, and under-convergence looks
+    # on screen exactly like genuine cluster collapse -- the one confound
+    # most worth ruling out before reading "these conditions look the same"
+    # as a biological result.
+    #
+    # Flat rather than scaled because the thing being converged is the
+    # embedding, not the dataset: a small dataset at 5,000 iterations costs
+    # seconds, and a large one needs at least as many, so scaling only ever
+    # under-served the small case. Fewer is a preset away ("Fast
+    # exploration") when the point is a first look rather than a figure.
+    n_iter = DEFAULT_TSNE_ITER
+    early_exaggeration_iter = DEFAULT_TSNE_EARLY_ITER
 
     max_points = None if n_points <= 40_000 else 20_000
 
@@ -293,17 +351,21 @@ def suggest(n_points: int, *, learned: bool = True) -> ProjectionParams:
 # a fast look is not a converged layout, and saying so beats a single default
 # that is quietly one or the other.
 #
-# "Standard" raised from 500/250 to 750/250: 500 total iterations is
-# openTSNE's documented convergence FLOOR, not a target, and this project's
-# datasets (5k-48k points) sit above the size where that floor is enough --
-# see suggest()'s n_iter formula, which starts at 750 for the same reason.
-# Keeping "Standard" at the old value would mean the preset ladder's own
-# middle rung under-converges the moment n_points scales past a few thousand.
+# "Standard" is DEFAULT_TSNE_ITER, so the preset the panel shows on startup
+# and the value suggest() picks are the same number -- a ladder whose middle
+# rung disagrees with the default is two defaults, and the user cannot tell
+# which one they are looking at.
+#
+# The rungs below it are genuinely faster looks, not degraded ones: 500 is
+# openTSNE's documented convergence floor and 1500 is where these datasets
+# have mostly settled, so both are honest stopping points for "is there
+# anything here at all". Above it, 10000 is for a figure that has to be
+# right rather than quick.
 TSNE_PRESETS: tuple[tuple[str, int, int], ...] = (
-    ("Fast exploration", 250, 125),
-    ("Standard", 750, 250),
-    ("High quality", 1500, 400),
-    ("Very high quality", 3000, 500),
+    ("Fast exploration", 500, 250),
+    ("Good enough", 1500, 400),
+    ("Standard", DEFAULT_TSNE_ITER, DEFAULT_TSNE_EARLY_ITER),
+    ("Very high quality", 10000, 500),
 )
 
 

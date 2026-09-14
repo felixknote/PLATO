@@ -20,6 +20,7 @@ from plato.data.projection import (
     TSNE,
     TSNE_PRESETS,
     ProjectionParams,
+    suggest,
     tsne_preset,
 )
 
@@ -301,5 +302,11 @@ def test_presets_are_ordered_by_cost():
     # convergence FLOOR, not a target, and this project's datasets (5k-48k
     # points) sit above the size where that floor is enough -- see
     # suggest()'s n_iter formula, which starts at 750 for the same reason.
-    assert tsne_preset("Standard") == (750, 250)
+    # Standard IS the suggested default, not a separate number: a ladder
+    # whose middle rung disagrees with what suggest() picks is two defaults,
+    # and the user cannot tell which one is on screen.
+    from plato.data.projection import DEFAULT_TSNE_EARLY_ITER, DEFAULT_TSNE_ITER
+
+    assert tsne_preset("Standard") == (DEFAULT_TSNE_ITER, DEFAULT_TSNE_EARLY_ITER)
+    assert tsne_preset("Standard") == (suggest(30_000).n_iter, suggest(30_000).early_exaggeration_iter)
     assert tsne_preset("nonsense") is None
