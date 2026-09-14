@@ -10,15 +10,24 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QLabel,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
 
-from ..data.joint_projection import IncompatibleEmbeddings, check_compatible
+from ..data.joint_projection import (
+    ALIGN_CENTRE,
+    ALIGN_LABELS,
+    ALIGN_NONE,
+    ALIGN_ZSCORE,
+    IncompatibleEmbeddings,
+    check_compatible,
+)
 from ..data.workspace import EmbeddingEntry
 from ..gui import themes
 
@@ -50,6 +59,48 @@ class CombineEmbeddingsDialog(QDialog):
             self._boxes[entry.key] = box
             checks.addWidget(box)
 
+        # Alignment. Raw concatenation is the default because it is the
+        # honest starting point: it shows what the vectors actually say.
+        # Centring is a deliberate act with a real cost -- it cannot tell a
+        # batch offset from a genuine global difference -- so it is offered
+        # with that said plainly rather than applied helpfully.
+        align_heading = QLabel("Align datasets before fitting")
+        align_heading.setObjectName("panelHeading")
+        align_why = QLabel(
+            "Datasets imaged at different times carry a shared offset that "
+            "the fit will separate on, producing two clean lobes that look "
+            "like a finding. Aligning removes that offset — but it cannot "
+            "tell it from a real difference between the screens, so it will "
+            "erase a genuine one just as readily."
+        )
+        align_why.setWordWrap(True)
+        align_why.setObjectName("muted")
+
+        self._align_group = QButtonGroup(self)
+        self._align_modes = [ALIGN_NONE, ALIGN_CENTRE, ALIGN_ZSCORE]
+        align_box = QVBoxLayout()
+        align_box.setSpacing(4)
+        tips = {
+            ALIGN_NONE: "What the vectors say, untouched. Start here.",
+            ALIGN_CENTRE: (
+                "Subtract each dataset's own mean, so the arms share an "
+                "origin. Removes the constant shift and nothing else; "
+                "distances within a dataset are unchanged."
+            ),
+            ALIGN_ZSCORE: (
+                "Also divide by each dataset's spread. Use when one screen "
+                "is noisier overall, not merely shifted — it asserts the "
+                "arms should have equal spread, which is wrong if a real "
+                "effect is what widens one."
+            ),
+        }
+        for index, mode in enumerate(self._align_modes):
+            button = QRadioButton(ALIGN_LABELS[mode])
+            button.setToolTip(tips[mode])
+            button.setChecked(mode == ALIGN_NONE)
+            self._align_group.addButton(button, index)
+            align_box.addWidget(button)
+
         self.status_label = QLabel("Choose at least two embeddings.")
         self.status_label.setWordWrap(True)
         self.status_label.setObjectName("hint")
@@ -66,6 +117,9 @@ class CombineEmbeddingsDialog(QDialog):
         layout.setSpacing(10)
         layout.addWidget(intro)
         layout.addLayout(checks)
+        layout.addWidget(align_heading)
+        layout.addWidget(align_why)
+        layout.addLayout(align_box)
         layout.addWidget(self.status_label)
         layout.addWidget(self.buttons)
         self.setLayout(layout)
@@ -100,3 +154,10 @@ class CombineEmbeddingsDialog(QDialog):
 
     def selected_entries(self) -> list[EmbeddingEntry]:
         return self._selected()
+
+    def selected_align(self) -> str:
+        """Which alignment was chosen. ``ALIGN_NONE`` unless changed."""
+        index = self._align_group.checkedId()
+        if 0 <= index < len(self._align_modes):
+            return self._align_modes[index]
+        return ALIGN_NONE

@@ -223,3 +223,25 @@ def test_no_tracked_out_caps_in_the_stylesheet():
     """
     sheet = themes.stylesheet(themes.DARK_COLOURS)
     assert "text-transform: uppercase" not in sheet
+
+
+@pytest.mark.parametrize("theme_key", [themes.DARK, themes.LIGHT])
+@pytest.mark.parametrize("control", ["QSlider", "QRadioButton", "QCheckBox"])
+def test_every_stateful_control_is_styled(app, theme_key, control):
+    """Unstyled controls keep Fusion's blue, whatever the theme says.
+
+    Qt draws these from the QPalette Highlight when the stylesheet says
+    nothing about them, so they silently kept the pre-navy accent after the
+    palette changed -- first the sliders, then the radio buttons in the
+    combine dialog. Colour is the whole point of reserving a hue for chrome,
+    so a control wearing a different accent is a real defect, and one only
+    ever caught by looking. This asserts each has a rule at all.
+    """
+    from plato.gui import theme as theme_module
+
+    colours = themes.THEMES[theme_key]
+    sheet = theme_module.build_stylesheet(colours)
+    assert f"{control}::indicator" in sheet or f"{control}::groove" in sheet, (
+        f"{control} has no stylesheet rule, so Qt will draw it from the "
+        "QPalette Highlight rather than the theme accent"
+    )

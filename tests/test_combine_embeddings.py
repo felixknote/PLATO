@@ -60,7 +60,7 @@ def explorer(app, tmp_path, monkeypatch):
     return widget
 
 
-def _accept_with(monkeypatch, entries):
+def _accept_with(monkeypatch, entries, align="none"):
     """Patch CombineEmbeddingsDialog to act as if the user checked `entries`."""
     from plato.views import combine_dialog as cd
 
@@ -75,6 +75,9 @@ def _accept_with(monkeypatch, entries):
 
         def selected_entries(self):
             return entries
+
+        def selected_align(self):
+            return align
 
     monkeypatch.setattr(cd, "CombineEmbeddingsDialog", _FakeDialog)
 
@@ -93,6 +96,11 @@ def _reject(monkeypatch):
 
         def selected_entries(self):
             return []
+
+        def selected_align(self):
+            from plato.data.joint_projection import ALIGN_NONE
+
+            return ALIGN_NONE
 
     monkeypatch.setattr(cd, "CombineEmbeddingsDialog", _FakeDialog)
 
@@ -256,3 +264,41 @@ def test_three_way_combine(explorer, monkeypatch):
 
     explorer._combine_embeddings()
     assert explorer.workspace.current.n_points == 30
+
+
+# -- alignment reaching the explorer -------------------------------------------
+
+
+def test_the_dialogs_alignment_choice_reaches_the_joint_entry(explorer, monkeypatch):
+    """The dialog decides; the entry must actually be built that way.
+
+    Alignment that is offered but silently dropped is worse than not offering
+    it: the user believes the offset was removed and reads the layout
+    accordingly.
+    """
+    from plato.data.joint_projection import ALIGN_CENTRE
+
+    a, b = _entry("A", 20, 8), _entry("B", 20, 8)
+    explorer._add_entry(a)
+    explorer._add_entry(b)
+    _accept_with(monkeypatch, [a, b], align=ALIGN_CENTRE)
+    explorer._combine_embeddings()
+
+    joint = explorer.workspace.current
+    assert joint.info["align"] == ALIGN_CENTRE
+    assert "centred" in joint.name
+
+
+def test_an_unaligned_combine_is_unchanged(explorer, monkeypatch):
+    """The default path must stay exactly what it was."""
+    from plato.data.joint_projection import ALIGN_NONE
+
+    a, b = _entry("A", 20, 8), _entry("B", 20, 8)
+    explorer._add_entry(a)
+    explorer._add_entry(b)
+    _accept_with(monkeypatch, [a, b])
+    explorer._combine_embeddings()
+
+    joint = explorer.workspace.current
+    assert joint.info["align"] == ALIGN_NONE
+    assert "centred" not in joint.name

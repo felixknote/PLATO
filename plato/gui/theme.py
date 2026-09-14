@@ -239,6 +239,43 @@ QCheckBox::indicator:checked {{
     background-color: {ACCENT};
     border-color: {ACCENT};
 }}
+QCheckBox::indicator:disabled {{
+    border-color: {BORDER};
+    background-color: {BACKGROUND};
+}}
+
+/* -- radio buttons ------------------------------------------------------ */
+
+/* Unstyled, these fell through to Fusion's own drawing, which takes the dot
+   from the QPalette Highlight and so rendered the pre-navy blue -- the same
+   trap the sliders fell into. Round, not rounded: the shape is what says
+   "one of these", where a checkbox says "any of these". */
+
+QRadioButton {{ spacing: 8px; padding: 3px; background: transparent; }}
+QRadioButton::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 1px solid {BORDER_STRONG};
+    border-radius: 9px;
+    background-color: {SURFACE};
+}}
+QRadioButton::indicator:hover {{ border-color: {ACCENT}; }}
+/* The dot is a thick border, not an ::indicator image -- there is no icon
+   pipeline here and the border-triangle trick that draws the combo chevron
+   renders as a filled square for these (see the QSpinBox note). A thick
+   border needs the radius raised with it: at border-radius 9px a 5px border
+   squares off the corners, because the radius applies to the OUTER box and
+   what is left inside is no longer round. Half the outer box (16 + 2*5 = 26,
+   so 13px) keeps it circular. */
+QRadioButton::indicator:checked {{
+    border: 5px solid {ACCENT};
+    border-radius: 13px;
+    background-color: {SURFACE};
+}}
+QRadioButton::indicator:disabled {{
+    border-color: {BORDER};
+    background-color: {BACKGROUND};
+}}
 
 /* -- sliders ----------------------------------------------------------- */
 

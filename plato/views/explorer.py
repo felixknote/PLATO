@@ -2174,12 +2174,32 @@ class EmbeddingExplorer(QWidget):
 
         Percentile limits, not min/max: one saturated field would otherwise
         compress every other point into the bottom of the scale.
+
+        The limits come from every projected point, not from the ones
+        currently visible -- the same rule the categorical path follows for
+        its colour universe, and for the same reason. Taken from the visible
+        subset, the ramp would rescale whenever a filter or a facet changed
+        what is on screen: a point would change colour without changing
+        value, two facets of one grid would draw the same measurement in
+        different colours, and the range readout would disagree between two
+        exports of the same data. Filtering must only ever hide points, never
+        repaint the ones that remain.
         """
         from .palette import ramp_over_array
 
         values = np.asarray(values, dtype=np.float32)
-        finite = values[np.isfinite(values)]
-        if len(finite) == 0:
+        scale_values = self._stat_values(rows)
+        scale_values = (
+            values if scale_values is None
+            else np.asarray(scale_values, dtype=np.float32)
+        )
+        finite = scale_values[np.isfinite(scale_values)]
+        # Two different questions, so two different arrays. "Is there a scale
+        # to draw" is about every projected point; "is there anything on
+        # screen to colour" is about the visible ones. A filter that hides
+        # every measured point still gets the plain readout below, even
+        # though the dataset as a whole does have a range.
+        if len(finite) == 0 or not np.isfinite(values).any():
             # Measured nothing that is on screen: draw the points plainly
             # rather than an all-grey plot with a meaningless scale.
             self.scatter.set_points(
@@ -2519,11 +2539,12 @@ class EmbeddingExplorer(QWidget):
         chosen = dialog.selected_entries()
         if len(chosen) < 2:
             return
+        align = dialog.selected_align()
 
         from ..data.joint_projection import IncompatibleEmbeddings, make_joint_entry
 
         try:
-            entry = make_joint_entry(chosen)
+            entry = make_joint_entry(chosen, align=align)
         except IncompatibleEmbeddings as exc:
             QMessageBox.warning(self, "Combine embeddings", str(exc))
             return
@@ -2562,9 +2583,12 @@ class EmbeddingExplorer(QWidget):
         dataset_index = self.colour_box.findData(DATASET_COLUMN)
         if dataset_index >= 0:
             self.colour_box.setCurrentIndex(dataset_index)
+        from ..data.joint_projection import ALIGN_NONE as _ALIGN_NONE
+
+        aligned = "" if align == _ALIGN_NONE else f", {align}-aligned"
         self.status.emit(
-            f"combined {len(chosen)} embeddings into {entry.n_points:,} points "
-            f"-- press Compute projection"
+            f"combined {len(chosen)} embeddings into {entry.n_points:,} points"
+            f"{aligned} -- press Compute projection"
         )
 
     def _on_tsne_changed(self) -> None:

@@ -19,9 +19,14 @@ import pytest
 
 from plato.data.embeddings import EmbeddingDataset
 from plato.data.joint_projection import (
+    ALIGN_CENTRE,
+    ALIGN_NONE,
+    ALIGN_ZSCORE,
     IncompatibleEmbeddings,
+    align_vectors,
     build_joint_dataset,
     check_compatible,
+    make_joint_entry,
 )
 from plato.data.workspace import DATASET_COLUMN, EMBEDDING_COLUMN, EmbeddingEntry
 
@@ -129,12 +134,18 @@ def test_fingerprint_changes_if_an_entry_changes():
     assert baseline.fingerprint != changed.fingerprint
 
 
-def test_a_real_joint_fit_separates_the_true_source_datasets():
+def test_a_real_joint_fit_preserves_structure_that_is_genuinely_there():
     """The end-to-end claim: joint position is meaningful, unlike separate fits.
 
-    Two synthetic, well-separated clusters, one per "dataset". A real UMAP fit
-    over their concatenation must recover which dataset each point came from,
-    verified by clustering the 2-D output and comparing to the true labels.
+    Two synthetic clusters that really ARE far apart in the vector space, one
+    per "dataset". A real UMAP fit over their concatenation must recover that,
+    verified by clustering the 2-D output against the true labels.
+
+    Note what this does and does not show. It shows the fit transmits real
+    structure faithfully -- it does NOT show that separated arms mean a
+    finding, because a batch offset produces this same picture from data with
+    no biological difference at all. See the alignment tests below for that
+    distinction; here the separation is real by construction.
     """
     pytest.importorskip("umap")
     from sklearn.cluster import KMeans
@@ -157,3 +168,139 @@ def test_a_real_joint_fit_separates_the_true_source_datasets():
     subset = joint.frame.iloc[result.row_indices]
     assert len(subset) == len(result.coords)
     assert set(subset[DATASET_COLUMN].unique()) == {"A", "B"}
+
+
+# -- alignment -----------------------------------------------------------------
+#
+# Projecting together gives the arms a shared coordinate system. It does not
+# make them comparable: a screen imaged in April and one in August differ in
+# illumination and staining, every point of an arm carries that same offset,
+# and the fit separates on it cleanly. The picture is indistinguishable from a
+# real biological difference, which is why "the datasets separated" is not by
+# itself a finding.
+
+
+def test_alignment_is_off_unless_asked_for():
+    """The raw concatenation is the honest default; aligning is a decision."""
+    a, b = _entry("A", 40, 8, center=5.0), _entry("B", 40, 8, center=-5.0)
+    joint = build_joint_dataset([a, b])
+    assert joint.align == ALIGN_NONE
+    assert np.allclose(joint.vectors[:40], a.vectors)
+    assert np.allclose(joint.vectors[40:], b.vectors)
+
+
+def test_centring_gives_each_dataset_the_same_origin():
+    a, b = _entry("A", 60, 8, center=8.0), _entry("B", 40, 8, center=-8.0)
+    joint = build_joint_dataset([a, b], align=ALIGN_CENTRE)
+    for source in joint.sources:
+        block = joint.vectors[source.start : source.stop]
+        assert np.allclose(block.mean(axis=0), 0.0, atol=1e-4)
+
+
+def test_centring_leaves_within_dataset_distances_untouched():
+    """It removes exactly one thing -- the shift -- and no structure.
+
+    This is what makes centring defensible at all: whatever the arm's own
+    points said about each other, they still say.
+    """
+    a, b = _entry("A", 30, 8, center=4.0), _entry("B", 30, 8)
+    raw = build_joint_dataset([a, b])
+    aligned = build_joint_dataset([a, b], align=ALIGN_CENTRE)
+
+    def within(vectors):
+        block = vectors[:30]
+        return np.linalg.norm(block[:, None] - block[None], axis=-1)
+
+    assert np.allclose(within(raw.vectors), within(aligned.vectors), atol=1e-3)
+
+
+def test_zscore_equalises_spread_as_well_as_origin():
+    a = _entry("A", 80, 8)
+    b = _entry("B", 80, 8)
+    b.dataset.vectors = (b.dataset.vectors * 10.0).astype(np.float32)
+    joint = build_joint_dataset([a, b], align=ALIGN_ZSCORE)
+    spreads = [
+        joint.vectors[s.start : s.stop].std(axis=0).mean() for s in joint.sources
+    ]
+    assert spreads[0] == pytest.approx(spreads[1], rel=0.05)
+
+
+def test_a_constant_feature_does_not_become_nan():
+    """0/0 in the z-score path would poison the whole fit, not one column."""
+    a, b = _entry("A", 20, 8), _entry("B", 20, 8)
+    a.dataset.vectors[:, 3] = 1.0
+    joint = build_joint_dataset([a, b], align=ALIGN_ZSCORE)
+    assert np.isfinite(joint.vectors).all()
+
+
+def test_aligning_removes_a_batch_offset_and_keeps_the_biology():
+    """The claim the feature exists for, on data with a known right answer.
+
+    Two arms carrying the SAME two biological classes plus a per-arm offset.
+    Raw, the arms separate and the classes are muddled; centred, the classes
+    separate and the arms do not.
+    """
+    pytest.importorskip("sklearn")
+    from sklearn.decomposition import PCA
+    from sklearn.metrics import silhouette_score
+
+    rng = np.random.default_rng(0)
+    dims = 32
+    signal = rng.normal(size=(2, dims))
+
+    def arm(name, offset, seed):
+        r = np.random.default_rng(seed)
+        labels = r.integers(0, 2, 200)
+        vectors = signal[labels] + r.normal(scale=0.5, size=(200, dims)) + offset
+        frame = pd.DataFrame({"gene": [f"g{v}" for v in labels]})
+        dataset = EmbeddingDataset(
+            name=name,
+            directory=Path(f"/data/{name}"),
+            vectors=vectors.astype(np.float32),
+            frame=frame,
+            run_info={},
+        )
+        return EmbeddingEntry(name=name, dataset=dataset, frame=frame), labels
+
+    a, la = arm("A", np.zeros(dims), 1)
+    b, lb = arm("B", rng.normal(scale=1.5, size=dims), 2)
+    by_dataset = np.r_[np.zeros(200), np.ones(200)]
+    by_biology = np.r_[la, lb]
+
+    def separation(vectors):
+        coords = PCA(2, random_state=0).fit_transform(vectors)
+        return (
+            silhouette_score(coords, by_dataset),
+            silhouette_score(coords, by_biology),
+        )
+
+    raw_dataset, raw_biology = separation(build_joint_dataset([a, b]).vectors)
+    aligned_dataset, aligned_biology = separation(
+        build_joint_dataset([a, b], align=ALIGN_CENTRE).vectors
+    )
+
+    # Raw: the offset dominates, and the arms separate at least as well as
+    # the biology does -- the trap this feature exists to expose.
+    assert raw_dataset > 0.3
+    # Centred: the arms stop separating, and the classes start.
+    assert aligned_dataset < 0.1
+    assert aligned_biology > raw_biology
+
+
+def test_an_aligned_fit_is_a_different_cache_entry():
+    """Otherwise the second combination silently restores the first's layout."""
+    a, b = _entry("A", 20, 8), _entry("B", 20, 8)
+    plain = build_joint_dataset([a, b]).fingerprint
+    centred = build_joint_dataset([a, b], align=ALIGN_CENTRE).fingerprint
+    scaled = build_joint_dataset([a, b], align=ALIGN_ZSCORE).fingerprint
+    assert len({plain, centred, scaled}) == 3
+
+
+def test_an_aligned_entry_says_so_in_its_name():
+    """The label reaches the export headline; a figure must not misstate this."""
+    a, b = _entry("A", 20, 8), _entry("B", 20, 8)
+    plain = make_joint_entry([a, b])
+    centred = make_joint_entry([a, b], align=ALIGN_CENTRE)
+    assert "centred" not in plain.name
+    assert "centred" in centred.name
+    assert centred.info["align"] == ALIGN_CENTRE

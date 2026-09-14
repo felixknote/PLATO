@@ -8,10 +8,19 @@ means the same thing across datasets is to project them together: concatenate
 the vectors, run one fit, and every point -- whichever dataset it came from --
 is now embedded relative to every other point in the same fit.
 
-This module does exactly that concatenation and nothing else. The fit itself
-is ``plato.data.projection.project``, unchanged: it already takes a plain
+This module does that concatenation, and optionally removes the offset
+between the arms first -- see ``align_vectors``. The fit itself is
+``plato.data.projection.project``, unchanged: it already takes a plain
 ``(n, d)`` array and does not need to know or care that its rows came from
 more than one source.
+
+**Projecting together is necessary but not sufficient.** One fit gives the
+arms a shared coordinate system; it does not make them comparable. If the
+datasets were imaged months apart, every point of one arm carries the same
+illumination/staining offset, and the fit will separate them cleanly on that
+alone -- a picture indistinguishable from a real biological difference. So
+"the datasets separated" is never by itself a finding, and alignment exists
+to let you ask whether the separation survives removing the offset.
 
 **The one real constraint**: every entry combined must share the same vector
 space -- same dimensionality, same model, same preprocessing. Concatenating a
@@ -37,6 +46,37 @@ from .workspace import (
     SOURCE_JOINT,
     EmbeddingEntry,
 )
+
+
+# How to handle the offset between datasets before the fit.
+#
+# Concatenating raw vectors assumes the datasets are already in a common
+# frame of reference. Often they are not: a screen run in April and one run
+# in August differ in illumination, staining and focus, and a deep encoder
+# reports those faithfully. The result is an additive shift shared by every
+# point of an arm, which the fit then reads as the dominant structure -- two
+# clean lobes, one per dataset, that look exactly like a biological finding
+# and are not one.
+#
+# Measured on synthetic arms carrying the same two biological classes plus a
+# per-arm offset (silhouette over the first two PCs, higher = more separated
+# by that variable):
+#
+#     raw concatenation    dataset 0.56   biology 0.55
+#     L2 normalised        dataset 0.51   biology 0.59
+#     per-arm centred      dataset 0.00   biology 0.91
+#
+# L2 normalisation -- which the cosine path already applies -- barely touches
+# it, because the shift survives projection onto the sphere.
+ALIGN_NONE = "none"
+ALIGN_CENTRE = "centre"
+ALIGN_ZSCORE = "zscore"
+
+ALIGN_LABELS = {
+    ALIGN_NONE: "None — raw concatenation",
+    ALIGN_CENTRE: "Centre each dataset",
+    ALIGN_ZSCORE: "Centre and scale each dataset",
+}
 
 
 class IncompatibleEmbeddings(ValueError):
@@ -70,6 +110,46 @@ class JointSource:
         return position - self.start
 
 
+def align_vectors(vectors: np.ndarray, sources: list[JointSource], mode: str) -> np.ndarray:
+    """Remove the between-dataset offset from a concatenated array.
+
+    Centring subtracts each arm's own mean, so the arms share an origin and
+    only within-arm structure is left for the fit to find. It removes exactly
+    one thing -- the constant shift -- and preserves every relative distance
+    inside an arm.
+
+    ``ALIGN_ZSCORE`` additionally divides by each arm's per-feature standard
+    deviation, for the case where one dataset is not merely shifted but more
+    variable overall (a noisier imaging session). It is the stronger claim of
+    the two: it asserts the arms *should* have equal spread, which is wrong
+    if a real treatment effect is what widens one of them.
+
+    **This is a deliberate distortion, not a correction.** Centring cannot
+    tell a batch offset from a genuine global difference between the two
+    populations, and will erase the second as readily as the first. If the
+    biological claim IS "these two screens differ overall", aligning removes
+    the evidence for it. That is why the default is ``ALIGN_NONE``: the
+    honest starting point is the raw concatenation, and alignment is
+    something to turn on deliberately, having decided that a shared offset
+    is an artefact.
+    """
+    if mode == ALIGN_NONE or not sources:
+        return vectors
+
+    out = np.array(vectors, dtype=np.float32, copy=True)
+    for source in sources:
+        block = out[source.start : source.stop]
+        if block.size == 0:
+            continue
+        block -= block.mean(axis=0, keepdims=True)
+        if mode == ALIGN_ZSCORE:
+            spread = block.std(axis=0, keepdims=True)
+            # A constant feature has no spread to normalise; dividing would
+            # turn 0/0 into NaN and poison the whole fit.
+            np.divide(block, spread, out=block, where=spread > 1e-6)
+    return out
+
+
 @dataclass(slots=True)
 class JointDataset:
     """The concatenation of several entries' vectors and metadata.
@@ -83,6 +163,7 @@ class JointDataset:
     frame: pd.DataFrame  # combined metadata, EMBEDDING_COLUMN/DATASET_COLUMN added
     sources: list[JointSource]
     fingerprint: str
+    align: str = ALIGN_NONE
 
     @property
     def n_points(self) -> int:
@@ -119,7 +200,9 @@ def check_compatible(entries: list[EmbeddingEntry]) -> None:
         )
 
 
-def build_joint_dataset(entries: list[EmbeddingEntry]) -> JointDataset:
+def build_joint_dataset(
+    entries: list[EmbeddingEntry], *, align: str = ALIGN_NONE
+) -> JointDataset:
     """Concatenate ``entries`` into one vector array and one metadata frame.
 
     Raises :class:`IncompatibleEmbeddings` via :func:`check_compatible` first.
@@ -146,16 +229,26 @@ def build_joint_dataset(entries: list[EmbeddingEntry]) -> JointDataset:
 
     vectors = np.concatenate(vector_parts, axis=0)
     frame = pd.concat(frame_parts, ignore_index=True)
+    # After concatenation, before the fit: alignment needs the arms in one
+    # array to know where each starts, and the fit must never see the
+    # unaligned version.
+    vectors = align_vectors(vectors, sources, align)
 
     return JointDataset(
         vectors=vectors,
         frame=frame,
         sources=sources,
-        fingerprint=_joint_fingerprint(entries),
+        align=align,
+        # Part of the fingerprint, so an aligned and an unaligned combination
+        # of the same entries are different cache entries. Without it the
+        # second would silently restore the first's cached layout.
+        fingerprint=_joint_fingerprint(entries, align),
     )
 
 
-def make_joint_entry(entries: list[EmbeddingEntry], *, name: str = "") -> EmbeddingEntry:
+def make_joint_entry(
+    entries: list[EmbeddingEntry], *, name: str = "", align: str = ALIGN_NONE
+) -> EmbeddingEntry:
     """Build a real ``EmbeddingEntry`` from a joint fit of ``entries``.
 
     Wraps the concatenated vectors/frame in an ``EmbeddingDataset`` so this
@@ -169,8 +262,14 @@ def make_joint_entry(entries: list[EmbeddingEntry], *, name: str = "") -> Embedd
     requires one, but a joint entry is never re-loaded from disk so nothing
     reads it as real.
     """
-    joint = build_joint_dataset(entries)
+    joint = build_joint_dataset(entries, align=align)
     label = name or " + ".join(e.name for e in entries)
+    if align != ALIGN_NONE:
+        # In the name itself, not only in info: the label is what reaches the
+        # open-embeddings list, the window and the export headline, and an
+        # aligned fit that presents as a plain one is a figure that misstates
+        # what was done to the data.
+        label = f"{label} [{'centred' if align == ALIGN_CENTRE else 'centred+scaled'}]"
     directory = Path("<joint>") / "+".join(sorted(e.key for e in entries))
 
     dataset = EmbeddingDataset(
@@ -188,12 +287,13 @@ def make_joint_entry(entries: list[EmbeddingEntry], *, name: str = "") -> Embedd
         info={
             "source_names": [e.name for e in entries],
             "source_keys": [e.key for e in entries],
+            "align": align,
         },
     )
     return entry
 
 
-def _joint_fingerprint(entries: list[EmbeddingEntry]) -> str:
+def _joint_fingerprint(entries: list[EmbeddingEntry], align: str = ALIGN_NONE) -> str:
     """A fingerprint over the ordered set of entries.
 
     Order matters -- {A, B} concatenated is not the same array as {B, A} --
@@ -206,4 +306,5 @@ def _joint_fingerprint(entries: list[EmbeddingEntry]) -> str:
     for entry in entries:
         digest.update(entry.key.encode())
         digest.update(entry.fingerprint().encode())
+    digest.update(align.encode())
     return digest.hexdigest()[:16]
