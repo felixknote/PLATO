@@ -245,3 +245,57 @@ def test_every_stateful_control_is_styled(app, theme_key, control):
         f"{control} has no stylesheet rule, so Qt will draw it from the "
         "QPalette Highlight rather than the theme accent"
     )
+
+
+# -- the sidebar's width is measured, not guessed -------------------------------
+
+
+def test_the_sidebar_floor_fits_every_sections_controls(app):
+    """The bug: a written-down 340 went stale the moment Encoding grew.
+
+    "Mark controls..." (added this session) took Encoding's real width to
+    350, past the constant, so its combos clipped their right edge with no
+    scrollbar to reveal them -- horizontal scrolling is off by design, so a
+    control past the pane's edge is simply gone.
+
+    This opens every section in turn and checks that nothing inside it sits
+    right of the pane at the floor _sidebar_floor() computed -- the actual
+    failure mode, not a proxy for it.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from plato.views.explorer import EmbeddingExplorer
+
+    class _Session:
+        pass
+
+    widget = EmbeddingExplorer(_Session(), Path(tempfile.mkdtemp()))
+    widget.resize(1500, 950)
+    widget.show()
+    app.processEvents()
+    app.processEvents()
+
+    pane = widget.splitter.widget(0)
+    overflow = 0
+    for section in widget.accordion.sections():
+        widget.accordion.open_section(_key_for(widget.accordion, section))
+        app.processEvents()
+        app.processEvents()
+        for child in section.body.findChildren(object):
+            if not hasattr(child, "isVisible") or not hasattr(child, "mapTo"):
+                continue
+            if not child.isVisible():
+                continue
+            top_left = child.mapTo(pane, child.rect().topLeft())
+            right_edge = top_left.x() + child.width()
+            overflow = max(overflow, right_edge - pane.width())
+
+    assert overflow <= 0, f"a control overflows the sidebar by {overflow}px"
+
+
+def _key_for(accordion, section):
+    for key, candidate in accordion._sections.items():
+        if candidate is section:
+            return key
+    raise AssertionError("section not found in its own accordion")

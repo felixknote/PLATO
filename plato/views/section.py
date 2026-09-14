@@ -276,6 +276,15 @@ class Accordion(QWidget):
     def section(self, key: str) -> Section | None:
         return self._sections.get(key)
 
+    def sections(self) -> list[Section]:
+        """Every section, in the order they were added.
+
+        Exists so a caller can measure what the column needs to be without
+        opening each one: a closed section hides its body, and a hidden
+        widget contributes nothing to a parent's size hint.
+        """
+        return list(self._sections.values())
+
     def set_summary(self, key: str, text: str) -> None:
         section = self._sections.get(key)
         if section is not None:

@@ -24,6 +24,7 @@ import pandas as pd
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QStyle,
     QAbstractItemView,
     QCheckBox,
     QComboBox,
@@ -133,6 +134,14 @@ from .section import Accordion
 # joint fit, a handful of plates -- which is where imbalance is invisible
 # and changes how cluster density reads.
 LEGEND_COUNT_LIMIT = 12
+
+# What a Section adds around its body: the header's indent, the body margins,
+# and the slack between what a form reports before Qt has laid it out and
+# what it needs once shown. Measured, not guessed -- the Encoding body hints
+# 255 px at construction and 350 once visible, so a floor taken from the
+# construction-time hint alone lands ~95 px short and clips exactly the
+# controls that grew last.
+SECTION_CHROME_WIDTH = 100
 
 # Hard ceiling on legend rows, whatever the palette. Past this the legend is
 # taller than the plot and stops being readable at all.
@@ -1069,8 +1078,14 @@ class EmbeddingExplorer(QWidget):
         # left edge at that width -- and a hard maximum meant the only way to
         # read them was to not have them. The splitter now decides, within
         # bounds that keep the plot usable.
-        left_scroll.setMinimumWidth(300)
-        left_scroll.setMaximumWidth(560)
+        # The floor is what the widest section actually needs, asked of the
+        # widgets rather than written down. A hard-coded 340 was measured
+        # once and then went stale the moment a control was added -- the
+        # Encoding section grew to 350 and clipped its combos off the right
+        # edge, with no scrollbar to reveal them (see below). Deriving it
+        # means the next control that widens a section widens the pane too.
+        left_scroll.setMinimumWidth(self._sidebar_floor())
+        left_scroll.setMaximumWidth(700)
         # Never a horizontal scrollbar: the controls should wrap into the
         # width they are given, not slide out of reach under one.
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -1185,11 +1200,11 @@ class EmbeddingExplorer(QWidget):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
-        # 340, not 300: the sidebar opens at its minimum, and at 300 the
-        # section forms (a label column plus a combo) are a few pixels wider
-        # than the pane, so every combo clipped its right edge on first show.
-        # Measured against the widest section body rather than guessed.
-        self.splitter.setSizes([340, 1000, 360])
+        # Opens at the measured floor, not a constant: same reason as
+        # left_scroll's minimum. Written down, this was 340 while the widest
+        # section needed 350 plus a scrollbar, so the Encoding controls were
+        # clipped on first show every time.
+        self.splitter.setSizes([self._sidebar_floor(), 1000, 360])
         self.splitter.setChildrenCollapsible(False)
         # Wider column, bigger previews. Debounced: a drag emits a signal per
         # pixel, and re-decoding images on each would make the drag crawl.
@@ -2641,6 +2656,45 @@ class EmbeddingExplorer(QWidget):
         entries = self.workspace.entries
         self.open_list.set_entries(entries, self.workspace.current_key)
         self.combine_button.setVisible(len(entries) > 1)
+
+    def _sidebar_floor(self) -> int:
+        """The narrowest the sidebar can be without clipping its controls.
+
+        Asked of the accordion rather than hard-coded. Every section is laid
+        out as a label column plus a control, so the widest section is what
+        sets the floor -- and that changes whenever a control is added, which
+        is exactly how the previous written-down 340 went stale.
+
+        A vertical scrollbar is always present (the sections are taller than
+        the pane), and horizontal scrolling is off by design, so its width
+        has to come out of the content's share rather than being borrowed
+        from it.
+        """
+        # Each body directly, not the accordion: a closed section hides its
+        # body, and a hidden widget contributes nothing to its parent's hint,
+        # so asking the accordion would measure only whichever section is
+        # open and report a different floor depending on which that was.
+        #
+        # The body's own hint understates at construction (Qt has not laid
+        # the nested forms out yet), so the section's chrome -- the header
+        # indent and the margins either side of the body -- is added back
+        # explicitly rather than trusted to be included.
+        needed = 0
+        for section in self.accordion.sections():
+            body = getattr(section, "body", None)
+            if body is not None:
+                needed = max(
+                    needed,
+                    body.minimumSizeHint().width(),
+                    body.sizeHint().width(),
+                )
+        needed += SECTION_CHROME_WIDTH
+        scrollbar = self.style().pixelMetric(
+            QStyle.PixelMetric.PM_ScrollBarExtent
+        )
+        # A little slack for the scroll area's own frame and the layout
+        # margins either side, which are not in the accordion's hint.
+        return max(300, needed + scrollbar + 16)
 
     def _cycle_embedding(self, step: int) -> None:
         """Move to the next or previous open embedding.
