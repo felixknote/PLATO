@@ -71,43 +71,62 @@ def accordion(app):
     return acc
 
 
-# -- the accordion invariant ---------------------------------------------------
+# -- independent open/close, starting fully collapsed ---------------------------
+#
+# This used to be "at most one section is open at a time" -- opening a second
+# closed whichever was open first. That was the wrong trade the moment two
+# sections are genuinely being used together (colouring by gene while reading
+# the filter a legend click just opened, say): closing one to open the other
+# meant reopening it right afterward, every time. Sections now start closed
+# and stay exactly as opened or closed as whatever last touched them said.
 
 
 def test_starts_with_everything_closed(accordion):
-    assert accordion.open_key() is None
+    assert accordion.open_keys() == []
     for key in accordion.keys():
         assert not accordion.section(key).body.isVisibleTo(accordion)
 
 
-def test_opening_one_closes_the_others(accordion):
+def test_opening_one_leaves_the_others_alone(accordion):
     accordion.open_section("one")
-    assert accordion.open_key() == "one"
+    assert accordion.open_keys() == ["one"]
     accordion.open_section("three")
-    assert accordion.open_key() == "three"
-    assert [k for k in accordion.keys() if accordion.section(k).is_open()] == ["three"]
+    # Both stay open -- this is the behaviour change itself.
+    assert accordion.open_keys() == ["one", "three"]
+    assert accordion.section("one").is_open()
+    assert accordion.section("three").is_open()
 
 
-def test_invariant_holds_when_the_header_is_clicked(accordion):
+def test_the_same_holds_when_the_header_is_clicked(accordion):
     """Not just via open_section -- the header is what a user actually hits."""
     accordion.section("one").header.setChecked(True)
     accordion.section("two").header.setChecked(True)
     open_now = [k for k in accordion.keys() if accordion.section(k).is_open()]
-    assert open_now == ["two"]
+    assert open_now == ["one", "two"]
 
 
-def test_a_section_can_be_closed_leaving_none_open(accordion):
+def test_a_section_can_be_closed_without_touching_the_others(accordion):
     accordion.open_section("one")
-    accordion.section("one").set_open(False)
-    assert accordion.open_key() is None
-
-
-def test_body_visibility_follows_the_header(accordion):
-    section = accordion.section("two")
     accordion.open_section("two")
-    assert section.body.isVisibleTo(section)
+    accordion.section("one").set_open(False)
+    assert accordion.open_keys() == ["two"]
+
+
+def test_body_visibility_follows_each_sections_own_header(accordion):
+    one = accordion.section("one")
+    two = accordion.section("two")
+    accordion.open_section("two")
+    assert two.body.isVisibleTo(two)
+    # Opening a second section must not hide the first's body any more.
     accordion.open_section("one")
-    assert not section.body.isVisibleTo(section)
+    assert one.body.isVisibleTo(one)
+    assert two.body.isVisibleTo(two)
+
+
+def test_every_section_can_be_open_at_once(accordion):
+    for key in accordion.keys():
+        accordion.open_section(key)
+    assert set(accordion.open_keys()) == set(accordion.keys())
 
 
 # -- summaries: what makes hiding a section safe -------------------------------

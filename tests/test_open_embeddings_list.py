@@ -64,15 +64,20 @@ def explorer(app, tmp_path):
 
 
 def test_list_hidden_with_zero_or_one_entry(explorer):
-    assert not explorer.open_list.isVisibleTo(explorer)
+    # isHidden(), not isVisibleTo(explorer): the list lives inside a
+    # collapsible Data section that starts closed, and isVisibleTo composes
+    # through that closed ancestor -- it would read False here regardless of
+    # what this widget's own set_entries(...) decided. isHidden() reports
+    # only the flag this widget itself was told to have.
+    assert explorer.open_list.isHidden()
     explorer._add_entry(_entry("A"))
-    assert not explorer.open_list.isVisibleTo(explorer)
+    assert explorer.open_list.isHidden()
 
 
 def test_list_visible_with_two_or_more(explorer):
     explorer._add_entry(_entry("A"))
     explorer._add_entry(_entry("B"))
-    assert explorer.open_list.isVisibleTo(explorer)
+    assert not explorer.open_list.isHidden()
     assert len(explorer.open_list._rows) == 2
 
 

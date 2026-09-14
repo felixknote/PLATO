@@ -32,7 +32,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QPainterPath, QPolygonF
-from PySide6.QtWidgets import QGraphicsRectItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QGraphicsRectItem, QVBoxLayout, QWidget
 
 from ..gui.theme import BORDER, IMAGE_BACKGROUND, TEXT, TEXT_MUTED
 
@@ -301,6 +301,12 @@ class EmbeddingScatter(QWidget):
     # Empty when cleared. One signal for all three so the explorer has exactly
     # one place to keep the preview column in sync.
     points_selected = Signal(object)
+    # A legend swatch was clicked: (value, additive). Plain click means "just
+    # this value"; shift/ctrl-click means "add or remove this value from
+    # whatever is already filtered", matching the box-selection convention
+    # the plot already uses. The explorer owns turning this into a filter --
+    # this widget knows nothing about FilterList.
+    legend_value_clicked = Signal(str, bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -341,6 +347,7 @@ class EmbeddingScatter(QWidget):
         self.legend: pg.LegendItem | None = None
         # Kept so a theme change can rebuild the legend without a full redraw.
         self._legend_entries: list[tuple[str, str]] | None = None
+        self._legend_values: list[str] | None = None
 
         # -- lasso
         self.lasso_enabled = False
@@ -398,6 +405,7 @@ class EmbeddingScatter(QWidget):
         opacity: float = 0.85,
         symbols: list[str] | None = None,
         legend_entries: list[tuple[str, str]] | None = None,
+        legend_values: list[str] | None = None,
         emphasise: np.ndarray | None = None,
         reset_view: bool = True,
     ) -> None:
@@ -409,6 +417,12 @@ class EmbeddingScatter(QWidget):
             colours: hex colour per point.
             groups: optional colour -> positional mask, to skip regrouping.
             legend_entries: (label, colour) pairs; None hides the legend.
+            legend_values: the raw column value behind each entry, same
+                order as legend_entries. A label can carry a point count
+                ("gyrA  (120)") or read "(blank)" for an empty string, so it
+                cannot be parsed back into a value -- this is what a legend
+                click resolves against to build a filter. None (the facet
+                grid's own legend, which is not clickable) disables clicking.
             emphasise: boolean mask of points to draw larger, outlined and on
                 top. Marked controls use this: a control is the reference
                 every other point is judged against, and at 3 px inside a
@@ -535,7 +549,7 @@ class EmbeddingScatter(QWidget):
         if self.density_enabled:
             self._render_density()
 
-        self._set_legend(legend_entries)
+        self._set_legend(legend_entries, legend_values)
         if self._view_limits is not None:
             self._apply_view_limits()
         elif reset_view:
@@ -546,8 +560,13 @@ class EmbeddingScatter(QWidget):
             self.plot.removeItem(item)
         self._items.clear()
 
-    def _set_legend(self, entries: list[tuple[str, str]] | None) -> None:
+    def _set_legend(
+        self,
+        entries: list[tuple[str, str]] | None,
+        values: list[str] | None = None,
+    ) -> None:
         self._legend_entries = entries
+        self._legend_values = list(values) if values is not None else None
         if self.legend is not None:
             self.legend.scene().removeItem(self.legend)
             self.legend = None
@@ -591,7 +610,35 @@ class EmbeddingScatter(QWidget):
             sample = pg.ScatterPlotItem(
                 size=9, brush=pg.mkBrush(QColor(colour)), pen=None
             )
+            sample.setCursor(Qt.CursorShape.PointingHandCursor)
             self.legend.addItem(sample, f" {label}")
+        self.legend.sigSampleClicked.connect(self._on_legend_sample_clicked)
+
+    def _on_legend_sample_clicked(self, sample) -> None:
+        """A legend swatch was clicked: resolve it to its value and emit.
+
+        ``self.legend.items`` is ``[(sample, label), ...]`` in the exact
+        order ``addItem`` was called, which is the same order legend_values
+        was built in -- so the sample's position in that list is the
+        value's position in legend_values. No other handle on "which row"
+        survives past pyqtgraph's own click plumbing.
+        """
+        if self._legend_values is None or self.legend is None:
+            return
+        for index, (item_sample, _label) in enumerate(self.legend.items):
+            if item_sample is sample:
+                if index < len(self._legend_values):
+                    additive = bool(
+                        QApplication.keyboardModifiers()
+                        & (
+                            Qt.KeyboardModifier.ShiftModifier
+                            | Qt.KeyboardModifier.ControlModifier
+                        )
+                    )
+                    self.legend_value_clicked.emit(
+                        self._legend_values[index], additive
+                    )
+                return
 
     # -- density ----------------------------------------------------------
 
@@ -751,7 +798,7 @@ class EmbeddingScatter(QWidget):
         self.set_background(self.background_mode)
         # Rebuild the legend so its panel and ink follow the new theme.
         if self.legend is not None and self._legend_entries:
-            self._set_legend(self._legend_entries)
+            self._set_legend(self._legend_entries, self._legend_values)
         from ..gui import themes as _themes
 
         self._highlight.setPen(pg.mkPen(_themes.current().text, width=2))

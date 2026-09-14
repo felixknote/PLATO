@@ -487,6 +487,31 @@ class FilterList(QGroupBox):
             item.data(Qt.ItemDataRole.UserRole) for item in self.list.selectedItems()
         ]
 
+    def set_selected(self, values: set[str]) -> None:
+        """Select exactly the rows whose value is in ``values``.
+
+        Used by a legend click, which says "select this value" (or "toggle
+        this value" additively) rather than "select these rows in the list
+        widget" -- the list is the mechanism, not what either interaction is
+        actually about. Emits ``changed`` once rather than per row, so a
+        multi-value toggle triggers one redraw, not several.
+        """
+        self.list.blockSignals(True)
+        for row in range(self.list.count()):
+            item = self.list.item(row)
+            item.setSelected(item.data(Qt.ItemDataRole.UserRole) in values)
+        self.list.blockSignals(False)
+        self.changed.emit()
+
+    def toggle(self, value: str) -> None:
+        """Add ``value`` to the selection, or drop it if already selected."""
+        current = set(self.selected())
+        if value in current:
+            current.discard(value)
+        else:
+            current.add(value)
+        self.set_selected(current)
+
     def clear(self) -> None:
         self.list.clearSelection()
 
@@ -526,6 +551,10 @@ class EmbeddingExplorer(QWidget):
         self._stats_signals = None
         # Which statistic is colouring the plot, or None for metadata.
         self._stat_column: str | None = None
+        # Which column the on-screen legend is keyed to, so a click on one
+        # of its swatches knows what to filter -- see _on_legend_value_clicked.
+        # None until the first categorical redraw.
+        self._legend_column: str | None = None
         # Whether points are traced back to micrographs at all. When off, no
         # resolver is hunted, no path is resolved and no pixel is read -- see
         # set_image_mode. Selection, lasso analysis and filtering are
@@ -1055,9 +1084,14 @@ class EmbeddingExplorer(QWidget):
         self.accordion.add("filters", "Filters", _body(filter_body, clear_filters))
         self.accordion.add("stats", "Image statistics", _body(stats_group))
         self.accordion.add_stretch()
-        # Data is where the workflow starts and the only section that is
-        # useless closed on an empty app.
-        self.accordion.open_section("data")
+        # Every section starts closed. The summaries seeded just below are
+        # what make that safe -- the whole configuration is readable from
+        # the headers alone -- and several sections can now be open together
+        # (see Accordion), so there is no single "the workflow starts here"
+        # section left to open on the app's behalf; opening one for the user
+        # would just be a section they have to close if it is not the one
+        # they wanted.
+        #
         # Seed the closed-state summaries. Without this the headers stay blank
         # until the first control change, which is exactly the state the
         # summaries exist to explain.
@@ -1096,6 +1130,7 @@ class EmbeddingExplorer(QWidget):
         self.scatter.point_clicked.connect(self._on_point_clicked)
         self.scatter.point_activated.connect(self._on_click)
         self.scatter.points_selected.connect(self._on_selection)
+        self.scatter.legend_value_clicked.connect(self._on_legend_value_clicked)
         self.cluster_panel.clear_requested.connect(self.scatter.clear_selection)
 
         # Facets report into exactly the same handlers as the single plot, so
@@ -1958,6 +1993,71 @@ class EmbeddingExplorer(QWidget):
     def current_filters(self) -> dict[str, list[str]]:
         return {box.column: box.selected() for box in self.filters if box.selected()}
 
+    def _filter_box_for(self, column: str) -> FilterList | None:
+        """The filter box for ``column``, creating one on demand.
+
+        Not every colour-by field is in FILTER_FIELDS -- Dataset, plate
+        location, a custom grouping -- so a legend click on one of those
+        would otherwise have nowhere to land. Once created it is appended to
+        the same section and behaves identically to a box that was there
+        from the start.
+
+        Built from _colour_universe, not distinct_values. distinct_values
+        deliberately excludes the empty string -- it feeds the checklists in
+        _rebuild_filters, where a blank row is judged not worth offering as
+        a filter choice -- but the legend this box is being built FOR shows
+        exactly that blank as its own "(blank)" swatch (see
+        _colour_universe's own docstring), and a click on it must not land
+        on a box that has no row to select.
+        """
+        if self.frame is None or column not in self.frame.columns:
+            return None
+        for box in self.filters:
+            if box.column == column:
+                return box
+        values = self._colour_universe(column)
+        if not values:
+            return None
+        box = FilterList(column, self._group_label(column), values)
+        box.changed.connect(self.schedule_redraw)
+        self.filters.append(box)
+        self.filter_layout.addWidget(box)
+        return box
+
+    def _on_legend_value_clicked(self, value: str, additive: bool) -> None:
+        """A legend swatch was clicked: filter the plot to that value.
+
+        The fast path to "show me only the gyrA points" is clicking gyrA's
+        own swatch, not opening the Filters section and finding Gene in a
+        list of fields. Plain click replaces whatever was filtered on this
+        column with just this value; shift/ctrl-click adds or removes it,
+        matching the modifier convention lasso selection already uses.
+
+        A second click clearing the whole filter -- rather than reselecting
+        the same one value -- would be surprising the other way: nothing
+        else in the app treats a repeated click as "undo my last action".
+        """
+        column = getattr(self, "_legend_column", None)
+        if not column:
+            return
+        box = self._filter_box_for(column)
+        if box is None:
+            return
+        # "(blank)" is the legend's placeholder for an empty string; the
+        # column itself stores "", which is what FilterList's items carry as
+        # their UserRole data (see FilterList.__init__).
+        actual = "" if value == "(blank)" else value
+        if additive:
+            box.toggle(actual)
+        else:
+            box.set_selected({actual})
+        self.accordion.open_section("filters")
+        label = self._group_label(column)
+        self.status.emit(
+            f"filtered to {label}: {value}" if not additive
+            else f"{label}: {value} toggled"
+        )
+
     # -- projection -------------------------------------------------------
 
     def _params(self) -> ProjectionParams:
@@ -2354,12 +2454,19 @@ class EmbeddingExplorer(QWidget):
         # colours of an arbitrary subset, which only a per-point list allows.
         point_colours = [mapping.get(v, UNKNOWN_COLOUR) for v in values]
 
+        # Which column a legend click should filter. Remembered on self
+        # rather than threaded through the click signal, because the click
+        # arrives asynchronously from Qt/pyqtgraph and by the time it does
+        # this may no longer be the frame that was on screen when the legend
+        # was built -- see _on_legend_value_clicked.
+        self._legend_column = column
         self._draw(
             coords,
             visible,
             point_colours,
             groups=groups,
             legend_entries=legend_entries,
+            legend_values=ordered if legend_entries else None,
             reset_view=reset_view,
         )
 
@@ -2493,6 +2600,7 @@ class EmbeddingExplorer(QWidget):
         *,
         groups=None,
         legend_entries=None,
+        legend_values=None,
         reset_view: bool = False,
     ) -> None:
         """Send one set of styled points to the single plot or to the facets.
@@ -2524,6 +2632,7 @@ class EmbeddingExplorer(QWidget):
                 symbols=symbols,
                 emphasise=emphasise,
                 legend_entries=legend_entries,
+                legend_values=legend_values,
                 reset_view=reset_view,
             )
             if self.density_box.isChecked():

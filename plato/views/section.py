@@ -8,9 +8,16 @@ the sidebar was a long scroll of unrelated controls all at the same volume,
 and reaching Filters meant scrolling past Encoding and Grouping whether or not
 you cared about them.
 
-**The rule.** One section is open at a time. Opening one closes the rest, so
-the column's height is bounded by its single tallest section rather than by
-the sum of all of them, and the sidebar stops scrolling.
+**The rule.** Every section starts closed, and opening one leaves every other
+section exactly as it was. This replaced an earlier one-at-a-time version,
+where opening a second section closed whichever was open first -- workable
+while sections were mostly consulted one at a time, but the wrong trade the
+moment two are being used together (colouring by gene while adjusting a
+filter you just opened from a legend click, say): closing Encoding the moment
+Filters was opened for that meant reopening it right afterward, every time.
+Nothing was gained by forbidding two sections at once that starting closed
+does not already give -- the column's height was never the problem; showing
+seven expanded sections on first launch was.
 
 **Why that is safe here.** The usual objection to an accordion is that it
 hides state -- you cannot see that a filter is active if the filter section is
@@ -220,11 +227,13 @@ class Section(QFrame):
 
 
 class Accordion(QWidget):
-    """A column of sections where at most one is open.
+    """A column of independently collapsible sections, all closed to start.
 
-    Sections are added in workflow order. Every open/close goes through
-    ``_on_toggled``, so the one-at-a-time invariant holds no matter whether
-    the change came from a click, the keyboard, or code.
+    Sections no longer close one another -- opening one is just opening it.
+    ``section_opened`` still fires per open, for callers that want to react
+    to a particular section becoming visible (nothing currently does more
+    with it than it did when only one section could be open, but the signal
+    is kept rather than removed so such a caller is not forced to poll).
     """
 
     section_opened = Signal(str)
@@ -236,7 +245,6 @@ class Accordion(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(4)
         self.setLayout(self._layout)
-        self._guard = False
         # The column is what fixes the width; sections wrap into it.
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.setMinimumWidth(0)
@@ -256,17 +264,8 @@ class Accordion(QWidget):
         self._layout.addStretch(1)
 
     def _on_toggled(self, key: str, is_open: bool) -> None:
-        # Re-entrancy guard: closing the others below re-enters this slot.
-        if self._guard or not is_open:
-            return
-        self._guard = True
-        try:
-            for other, section in self._sections.items():
-                if other != key and section.is_open():
-                    section.set_open(False)
-        finally:
-            self._guard = False
-        self.section_opened.emit(key)
+        if is_open:
+            self.section_opened.emit(key)
 
     def open_section(self, key: str) -> None:
         section = self._sections.get(key)
@@ -299,7 +298,19 @@ class Accordion(QWidget):
         return list(self._sections)
 
     def open_key(self) -> str | None:
+        """The first open section's key, or None.
+
+        A holdover from when only one section could ever be open, kept
+        because most callers (tests included) only ever check "is at least
+        one thing open" or "is THIS specific one open" -- for which the
+        first match is as good as any. A caller that actually needs to know
+        about every open section should use ``open_keys`` instead.
+        """
         for key, section in self._sections.items():
             if section.is_open():
                 return key
         return None
+
+    def open_keys(self) -> list[str]:
+        """Every open section's key, in the order they were added."""
+        return [key for key, section in self._sections.items() if section.is_open()]

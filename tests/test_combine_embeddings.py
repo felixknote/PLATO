@@ -163,11 +163,15 @@ def test_dataset_colour_option_only_appears_for_a_joint_entry(explorer, monkeypa
 
 
 def test_combine_button_hidden_with_fewer_than_two_entries(explorer):
-    assert not explorer.combine_button.isVisibleTo(explorer)
+    # isHidden(), not isVisibleTo(explorer): the button lives inside a
+    # collapsible Data section that starts closed, and isVisibleTo composes
+    # through that closed ancestor regardless of what this widget's own
+    # setVisible(...) decided. isHidden() reports only this widget's flag.
+    assert explorer.combine_button.isHidden()
     explorer._add_entry(_entry("A", 10, 8))
-    assert not explorer.combine_button.isVisibleTo(explorer)
+    assert explorer.combine_button.isHidden()
     explorer._add_entry(_entry("B", 10, 8))
-    assert explorer.combine_button.isVisibleTo(explorer)
+    assert not explorer.combine_button.isHidden()
 
 
 def test_combine_button_hidden_once_only_the_joint_entry_remains(explorer, monkeypatch):
@@ -183,7 +187,7 @@ def test_combine_button_hidden_once_only_the_joint_entry_remains(explorer, monke
     explorer._close_current_embedding()
 
     assert len(explorer.workspace) == 1
-    assert not explorer.combine_button.isVisibleTo(explorer)
+    assert explorer.combine_button.isHidden()
 
 
 # -- rejection / no-op paths ---------------------------------------------------
