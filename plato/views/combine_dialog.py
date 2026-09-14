@@ -59,19 +59,24 @@ class CombineEmbeddingsDialog(QDialog):
             self._boxes[entry.key] = box
             checks.addWidget(box)
 
-        # Alignment. Raw concatenation is the default because it is the
-        # honest starting point: it shows what the vectors actually say.
-        # Centring is a deliberate act with a real cost -- it cannot tell a
-        # batch offset from a genuine global difference -- so it is offered
-        # with that said plainly rather than applied helpfully.
+        # Alignment. Raw concatenation is the default because the offset IS
+        # the measurement at this stage: screens imaged apart sit apart, and
+        # seeing how far apart, next to the biological structure, is the
+        # point of looking. Centring is a deliberate second question with a
+        # real cost -- it cannot tell a batch offset from a genuine
+        # difference -- so it is offered with that said plainly rather than
+        # applied helpfully.
         align_heading = QLabel("Align datasets before fitting")
         align_heading.setObjectName("panelHeading")
         align_why = QLabel(
-            "Datasets imaged at different times carry a shared offset that "
-            "the fit will separate on, producing two clean lobes that look "
-            "like a finding. Aligning removes that offset — but it cannot "
-            "tell it from a real difference between the screens, so it will "
-            "erase a genuine one just as readily."
+            "Datasets imaged at different times sit apart, and seeing that "
+            "is usually the point — it is what a batch effect looks like, "
+            "at a size you can compare against everything else in the data. "
+            "Leave this at None for that.\n\n"
+            "Centring is the follow-up question: what is left once the shift "
+            "is gone. It cannot tell a batch offset from a real difference "
+            "between the screens, so read it as a second picture, not as a "
+            "cleaned-up replacement for the first."
         )
         align_why.setWordWrap(True)
         align_why.setObjectName("muted")
@@ -81,7 +86,12 @@ class CombineEmbeddingsDialog(QDialog):
         align_box = QVBoxLayout()
         align_box.setSpacing(4)
         tips = {
-            ALIGN_NONE: "What the vectors say, untouched. Start here.",
+            ALIGN_NONE: (
+                "What the vectors say, untouched. The arms sit apart because "
+                "they are apart -- which is the measurement when the screens "
+                "were imaged at different times. Stay here unless you have a "
+                "specific reason not to."
+            ),
             ALIGN_CENTRE: (
                 "Subtract each dataset's own mean, so the arms share an "
                 "origin. Removes the constant shift and nothing else; "

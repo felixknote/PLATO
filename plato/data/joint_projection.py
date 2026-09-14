@@ -14,13 +14,21 @@ between the arms first -- see ``align_vectors``. The fit itself is
 ``(n, d)`` array and does not need to know or care that its rows came from
 more than one source.
 
-**Projecting together is necessary but not sufficient.** One fit gives the
-arms a shared coordinate system; it does not make them comparable. If the
-datasets were imaged months apart, every point of one arm carries the same
-illumination/staining offset, and the fit will separate them cleanly on that
-alone -- a picture indistinguishable from a real biological difference. So
-"the datasets separated" is never by itself a finding, and alignment exists
-to let you ask whether the separation survives removing the offset.
+**Seeing the arms separate is usually the point, not a problem.** Datasets
+imaged months apart differ in illumination, staining and focus, so every
+point of an arm carries the same offset and the fit separates them cleanly.
+At this stage -- looking for confounders before anything is trained -- that
+separation is the measurement: it is what a batch effect LOOKS like, and a
+joint fit is how you see its size relative to everything else in the data.
+Frozen DINO features are used precisely because they report it undisguised.
+
+So the raw concatenation is the default and the normal way to work. What the
+picture cannot do on its own is tell a batch offset from a genuine global
+difference between the screens, since both put the arms in different places.
+``align_vectors`` is the second look for that one question: centring removes
+the constant shift, so structure that survives it was not the shift. It is
+a diagnostic to reach for deliberately, not a correction to apply first --
+run on data whose arms genuinely differ, it erases the evidence.
 
 **The one real constraint**: every entry combined must share the same vector
 space -- same dimensionality, same model, same preprocessing. Concatenating a
@@ -48,19 +56,19 @@ from .workspace import (
 )
 
 
-# How to handle the offset between datasets before the fit.
+# Whether to remove the offset between datasets before the fit.
 #
-# Concatenating raw vectors assumes the datasets are already in a common
-# frame of reference. Often they are not: a screen run in April and one run
-# in August differ in illumination, staining and focus, and a deep encoder
-# reports those faithfully. The result is an additive shift shared by every
-# point of an arm, which the fit then reads as the dominant structure -- two
-# clean lobes, one per dataset, that look exactly like a biological finding
-# and are not one.
+# Raw concatenation (ALIGN_NONE) is the default and the normal way to work.
+# A screen run in April and one run in August differ in illumination,
+# staining and focus; a deep encoder reports that faithfully as an additive
+# shift shared by every point of an arm, and the fit lays the arms out apart
+# because they ARE apart. Seeing that, and how large it is next to the
+# biological structure, is the job at this stage.
 #
-# Measured on synthetic arms carrying the same two biological classes plus a
-# per-arm offset (silhouette over the first two PCs, higher = more separated
-# by that variable):
+# Centring is the follow-up question, not the starting point: "does anything
+# survive removing the shift". Measured on synthetic arms carrying the same
+# two biological classes plus a per-arm offset (silhouette over the first two
+# PCs, higher = more separated by that variable):
 #
 #     raw concatenation    dataset 0.56   biology 0.55
 #     L2 normalised        dataset 0.51   biology 0.59
@@ -73,7 +81,7 @@ ALIGN_CENTRE = "centre"
 ALIGN_ZSCORE = "zscore"
 
 ALIGN_LABELS = {
-    ALIGN_NONE: "None — raw concatenation",
+    ALIGN_NONE: "None — keep the offset (default)",
     ALIGN_CENTRE: "Centre each dataset",
     ALIGN_ZSCORE: "Centre and scale each dataset",
 }
@@ -127,11 +135,14 @@ def align_vectors(vectors: np.ndarray, sources: list[JointSource], mode: str) ->
     **This is a deliberate distortion, not a correction.** Centring cannot
     tell a batch offset from a genuine global difference between the two
     populations, and will erase the second as readily as the first. If the
-    biological claim IS "these two screens differ overall", aligning removes
-    the evidence for it. That is why the default is ``ALIGN_NONE``: the
-    honest starting point is the raw concatenation, and alignment is
-    something to turn on deliberately, having decided that a shared offset
-    is an artefact.
+    claim IS "these two screens differ", aligning removes the evidence for
+    it -- and when the screens were imaged apart, that difference is exactly
+    what you came to look at.
+
+    So ``ALIGN_NONE`` is the default and stays the normal view. Use this to
+    ask one follow-up question -- "what is left once the shift is gone" --
+    and read the answer as a second picture alongside the first, never as a
+    cleaned-up replacement for it.
     """
     if mode == ALIGN_NONE or not sources:
         return vectors
