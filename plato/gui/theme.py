@@ -159,6 +159,28 @@ QComboBox QAbstractItemView {{
     padding: 4px;
 }}
 
+/* -- spin box buttons -------------------------------------------------- */
+
+/* The body was styled above but the up/down buttons never were, so Fusion
+   drew its own unthemed arrows -- two stacked light rectangles against the
+   navy.
+
+   The border-triangle trick that draws the combo's chevron does NOT work
+   here: measured in this Qt build, a QSpinBox arrow with zero width/height
+   and coloured borders renders as a filled square whatever the
+   subcontrol-origin. So the buttons are hidden entirely and the value is
+   changed with the keyboard or the wheel, which is what these are used with
+   anyway -- a two-pixel arrow was never the affordance. Where a spin box
+   needs visible steppers, give it real buttons rather than fighting this. */
+
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    width: 0;
+    height: 0;
+    border: none;
+    background: transparent;
+}}
+
 /* -- lists ------------------------------------------------------------ */
 
 QListWidget, QListView {{

@@ -84,6 +84,8 @@ from ..data.explorer_model import (
     field_label,
     filter_fields,
 )
+from ..data import plate_location
+from ..data.custom_groups import GroupingStore, is_derived, source_of
 from ..data.index.db import ImageRow
 from ..data.locations import (
     DATA_LIBRARY,
@@ -118,6 +120,7 @@ from .open_embeddings_list import OpenEmbeddingsList
 from .stats_panel import StatsPanel
 from .selection_panel import SelectionPanel
 from .scatter import BACKGROUND_CHOICES, EmbeddingScatter
+from .group_dialog import GroupDialog
 from .section import Accordion
 
 # Legend gets unreadable long before this; past it, colour still encodes the
@@ -138,6 +141,10 @@ MAX_COMPARE_COLUMNS = 24
 # Most groups a facet variable may have before it is not offered. Well (96+)
 # is past the point where a grid tells you anything a single plot does not.
 MAX_FACET_GROUPS = 60
+
+# Most distinct values the custom-class dialog will list. Past this it is a
+# data-entry form, not a dialog -- see views/group_dialog.MAX_VALUES.
+MAX_GROUP_VALUES = 80
 
 # Subsample choices, as a share of the dataset.
 FULL_SAMPLE = "100% (all)"
@@ -432,6 +439,9 @@ class EmbeddingExplorer(QWidget):
         self._image_mode = True
         # Facet variable, or None for a single plot.
         self._group_column: str | None = None
+        # User-defined classes over a column's values. Applied to the frame
+        # as derived columns, so faceting/colouring never see a special case.
+        self.groupings = GroupingStore()
         # Set once the user picks a categorical palette themselves, so a
         # background change (which otherwise suggests the palette suited to
         # the new ground -- see _on_background_changed) never overrides a
@@ -696,6 +706,18 @@ class EmbeddingExplorer(QWidget):
         )
         self.group_box.currentIndexChanged.connect(self._on_group_changed)
 
+        # Define a class over the grouping column's values -- P1 and P2 into
+        # "Day 1" and so on. See data/custom_groups.py for why the result is
+        # an ordinary derived column rather than a special case in the draw
+        # path.
+        self.group_edit_button = QPushButton("Custom classes…")
+        self.group_edit_button.setToolTip(
+            "Combine several values of the selected field into one named "
+            "class -- plates measured on the same day, drugs of one class.\n"
+            "The result becomes its own Display by option."
+        )
+        self.group_edit_button.clicked.connect(self._edit_custom_groups)
+
         self.shared_axes_box = QCheckBox("Shared axes")
         self.shared_axes_box.setChecked(True)
         self.shared_axes_box.setToolTip(
@@ -813,6 +835,7 @@ class EmbeddingExplorer(QWidget):
         grouping_form = QFormLayout()
         grouping_form.setContentsMargins(6, 4, 6, 4)
         grouping_form.addRow("Display by", self.group_box)
+        grouping_form.addRow("", self.group_edit_button)
         grouping_form.addRow(self.shared_axes_box)
         grouping_form.addRow("Grid", self.grid_columns_box)
         grouping_form.addRow("Order", self.grid_sort_box)
@@ -1472,6 +1495,12 @@ class EmbeddingExplorer(QWidget):
         self._update_source_label()
         self.result = None
         self.apply_suggested_params()
+        # Re-materialise any custom classes onto the entry's own frame: the
+        # definitions belong to the workspace, the derived columns belong to
+        # whichever frame is live, and a grouping over a column this dataset
+        # does not have is simply skipped.
+        self.groupings.apply_all(self.frame)
+
         self.metadata_panel.set_frame(self.frame)
         self._rebuild_group_options()
         self._rebuild_shape_options()
@@ -1719,6 +1748,13 @@ class EmbeddingExplorer(QWidget):
             self.colour_box.addItem("Dataset", DATASET_COLUMN)
         for column in colour_fields(self.frame):
             self.colour_box.addItem(field_label(column), column)
+        # Custom classes are worth colouring by as well as faceting by --
+        # "are the day-1 plates displaced?" is a colour question before it is
+        # a facet one. Appended rather than interleaved: they are derived, and
+        # listing them after the real fields keeps the familiar order stable.
+        for column in self.groupings.labels():
+            if column in self.frame.columns and self.colour_box.findData(column) < 0:
+                self.colour_box.addItem(self._group_label(column), column)
         # Prefer a field that says something biological on first open.
         if current is not None:
             index = self.colour_box.findData(current)
@@ -2406,6 +2442,12 @@ class EmbeddingExplorer(QWidget):
             else None
         )
 
+        # Re-materialise any custom classes onto this entry's own frame. The
+        # definitions belong to the workspace and the derived columns belong
+        # to whichever frame is live, so switching datasets has to rebuild
+        # them; a grouping over a column this dataset lacks is skipped.
+        self.groupings.apply_all(self.frame)
+
         self.metadata_panel.set_frame(self.frame)
         self._rebuild_group_options()
         self._rebuild_shape_options()
@@ -2652,6 +2694,87 @@ class EmbeddingExplorer(QWidget):
         if self.shape_box.currentData() != previous:
             self.schedule_redraw()
 
+    def _edit_custom_groups(self) -> None:
+        """Define named classes over the currently selected grouping column.
+
+        Operates on the SOURCE column: opening this while already viewing a
+        custom grouping edits that grouping rather than trying to group the
+        grouping, which is what someone reaching for the button in that state
+        actually means.
+        """
+        if self.frame is None:
+            QMessageBox.information(self, "Custom classes", "Load a dataset first.")
+            return
+
+        column = self.group_box.currentData()
+        if not column:
+            # Nothing is being grouped by, so there is no column to classify.
+            # Falling back to "plate" would be a guess about a dataset that
+            # may not have one.
+            QMessageBox.information(
+                self,
+                "Custom classes",
+                "Choose a field in Display by first — custom classes group "
+                "that field's values.",
+            )
+            return
+        source = source_of(column) if is_derived(column) else column
+        if source not in self.frame.columns:
+            return
+
+        values = distinct_values(self.frame, source)
+        if not values:
+            return
+        if len(values) > MAX_GROUP_VALUES:
+            QMessageBox.information(
+                self,
+                "Custom classes",
+                f"{field_label(source)} has {len(values):,} distinct values. "
+                "Grouping is meant for a handful of them; filter first, or "
+                "group by something coarser.",
+            )
+            return
+
+        dialog = GroupDialog(
+            source,
+            field_label(source),
+            values,
+            existing=self.groupings.get(source),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        grouping = dialog.grouping()
+        had = self.groupings.get(source) is not None
+        self.groupings.set(grouping)
+        derived = grouping.column
+
+        if not grouping.assignments:
+            # Removed. Drop the derived column so the option disappears with
+            # it rather than lingering as a stale copy of the old classes.
+            if derived in self.frame.columns:
+                self.frame.drop(columns=[derived], inplace=True)
+            if self._group_column == derived:
+                self.group_box.setCurrentIndex(0)
+            self._rebuild_group_options()
+            self._rebuild_colour_options()
+            if had:
+                self.status.emit(f"removed custom classes for {field_label(source)}")
+            return
+
+        self.groupings.apply_all(self.frame)
+        self._rebuild_group_options()
+        self._rebuild_colour_options()
+        # Land on what was just defined: the user came here to look at it.
+        index = self.group_box.findData(derived)
+        if index >= 0:
+            self.group_box.setCurrentIndex(index)
+        self.status.emit(
+            f"{len(grouping.classes())} classes over "
+            f"{len(grouping.assignments)} {field_label(source).lower()} values"
+        )
+
     def _on_group_changed(self) -> None:
         """Switch between one plot and a facet per group."""
         self._group_column = self.group_box.currentData()
@@ -2690,6 +2813,15 @@ class EmbeddingExplorer(QWidget):
         self.grid_prev.setEnabled(self.grid.page > 0)
         self.grid_next.setEnabled(self.grid.page < pages - 1)
 
+    def _group_label(self, column: str) -> str:
+        """Display name for a grouping column, custom classes included.
+
+        field_label knows the canonical columns; a derived grouping column
+        (group_plate) is named by the grouping that made it, so it reads as
+        "Plate by measurement day" rather than "Group plate".
+        """
+        return self.groupings.labels().get(column) or field_label(column)
+
     def _rebuild_group_options(self) -> None:
         """Offer every categorical column the frame actually has."""
         previous = self.group_box.currentData()
@@ -2698,7 +2830,7 @@ class EmbeddingExplorer(QWidget):
         self.group_box.addItem("Off (single plot)", None)
         if self.frame is not None:
             for column in categorical_fields(self.frame, max_values=MAX_FACET_GROUPS):
-                self.group_box.addItem(field_label(column), column)
+                self.group_box.addItem(self._group_label(column), column)
         index = self.group_box.findData(previous)
         self.group_box.setCurrentIndex(max(0, index))
         self.group_box.blockSignals(False)
@@ -3044,9 +3176,31 @@ class EmbeddingExplorer(QWidget):
         condition = row.get("condition", "")
         if condition:
             parts.append(f"<b>{condition}</b>")
-        location = " ".join(x for x in (row.get(PLATE, ""), row.get(WELL, "")) if x)
-        if location:
-            parts.append(location)
+        # Where on the plate. Labelled rather than run together: "P1 A01" as a
+        # bare string reads as one opaque identifier, and which half is the
+        # well is exactly what you are looking for when a point turns out to
+        # sit on an edge. Row/column are spelled out alongside the well label
+        # because "A01" only says "row A, column 1" to someone already fluent
+        # in plate coordinates.
+        plate = str(row.get(PLATE, "") or "")
+        well = str(row.get(WELL, "") or "")
+        if plate:
+            parts.append(f"{field_label(PLATE)}: <b>{plate}</b>")
+        if well:
+            detail = ""
+            well_row = str(row.get(plate_location.WELL_ROW, "") or "")
+            well_col = str(row.get(plate_location.WELL_COL, "") or "")
+            edge = str(row.get(plate_location.EDGE_DISTANCE, "") or "")
+            if well_row and well_col:
+                detail = f" &mdash; row {well_row}, column {int(well_col)}"
+                if edge == "0":
+                    # The one value worth calling out: edge wells evaporate
+                    # and run warm, so "is this an edge well" is the first
+                    # question asked of a point that looks like an outlier.
+                    detail += ", <b>edge well</b>"
+                elif edge:
+                    detail += f", {edge} in from edge"
+            parts.append(f"{field_label(WELL)}: <b>{well}</b>{detail}")
         parts.append("")
         for column in (GENE, "guide", DRUG, CONCENTRATION, MOA, PATHWAY, ROLE):
             value = str(row.get(column, "") or "")

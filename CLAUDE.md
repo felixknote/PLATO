@@ -45,6 +45,7 @@ plato/
 | `annotations.py` | condition-string parsing, MoA/pathway tables, control labels |
 | `cluster_stats.py` | lasso composition: rank fields by divergence from background |
 | `plate_location.py` | row / column / distance-from-edge derived from `well` |
+| `custom_groups.py` | user-defined classes over a column (P1+P2 -> "Day 1") |
 | `image_stats.py` | raw per-image statistics (brightness/contrast/focus), opt-in |
 | `image_features.py` | 31 descriptors used **as** an embedding when no export exists |
 | `locations.py` | configured roots (env var → QSettings). **No hard-coded paths.** |
@@ -64,6 +65,7 @@ plato/
 | `compare_view.py` | `ComparisonView`/`ComparisonColumn`, shared locked `Viewport` |
 | `section.py` | `Accordion`/`Section`: the sidebar's one-open-at-a-time column |
 | `headline.py` | the title block composed above an exported plot |
+| `group_dialog.py` | the popup that defines custom classes over a column |
 | `palette.py` | value -> colour/shape assignment, stable across filters |
 | `palettes.py` | the palette registry: every named categorical/sequential/diverging scale |
 | `browser.py`, `model.py`, `preview.py` | browser arm + shared decode |
@@ -120,6 +122,11 @@ widgets re-read their colours.
   delivering a normal click — so a click handler must tolerate the first
   click having already acted.
 - Qt's SVG renderer **ignores `clipPath`** entirely.
+- A `QSpinBox` up/down **arrow** cannot be drawn with the zero-size
+  coloured-border triangle that works for `QComboBox::down-arrow` -- measured
+  in this build it renders as a filled square whatever `subcontrol-origin`
+  is. The theme hides the buttons instead (keyboard and wheel still work);
+  use real buttons where visible steppers are needed.
 - `histogram2d` returns `[x][y]`; `ImageItem` reads `[y][x]`. Transpose.
 - UMAP silently drops threads if `random_state` is set; the two are exclusive.
 - After L2-normalising, cosine and Euclidean give identical neighbours —
