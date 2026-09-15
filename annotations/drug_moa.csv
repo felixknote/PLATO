@@ -1,0 +1,28 @@
+drug,moa
+# Antibiotics missing from the lab's own AI4AB MoA table
+# (../AI4AB/analysis/E_coli_params/moa_dict.json / moa_dict_inv.json).
+#
+# THIS FILE LAYERS ON TOP of that table -- see AnnotationTable.merged_with
+# and annotations.load_default_moa. A drug named here wins for THIS file;
+# every drug not named here still comes from AI4AB's table unchanged.
+# Nothing here overwrites or duplicates an AI4AB entry; add a drug only if
+# it is genuinely missing there, and prefer correcting AI4AB's own table if
+# an entry there is wrong rather than shadowing it here.
+#
+# Class names follow the vocabulary AI4AB's table already uses:
+#   - Amikacin, Gentamicin: aminoglycosides, same Ribosome class as AI4AB's
+#     own Kanamycin.
+#   - Tetracycline: also a ribosome (30S) inhibitor, distinct mechanism from
+#     the aminoglycosides above but the same target class in this vocabulary
+#     -- matches AI4AB's own Doxycycline, a tetracycline-class drug.
+#   - Ampicillin: a penicillin, PBP1-active in E. coli like AI4AB's own
+#     PenicillinG entry -- joins Cell wall (PBP 1) rather than a new class,
+#     so it shares colour with the drug it is mechanistically closest to.
+#
+# Added 2026-09-15, requested directly (Amikacin, Ampicillin, Gentamicin,
+# Tetracycline reported missing while auditing colour-by-MoA coverage).
+# Lines starting with # are ignored, as are blank moa cells.
+Amikacin,Ribosome
+Gentamicin,Ribosome
+Ampicillin,Cell wall (PBP 1)
+Tetracycline,Ribosome

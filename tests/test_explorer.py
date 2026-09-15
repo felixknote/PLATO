@@ -197,12 +197,35 @@ def test_annotation_csv_ignores_comments(tmp_path):
     assert table.get("secA") == UNANNOTATED
 
 
-def test_shipped_pathway_template_is_blank():
-    """The shipped template must stay empty: PLATO must never invent biology."""
+def test_shipped_pathway_template_traces_to_a_real_source():
+    """PLATO must never invent biology -- but recording real biology is fine.
+
+    This ships filled in now (see the file's own header): a GO enrichment
+    against this project's actual CRISPRi gene panel, with mechanistically
+    distinct genes matched by hand to the MoA table's own vocabulary rather
+    than the raw GO clusters (which conflated some of them). The invariant
+    worth pinning is not "empty forever" but "every value present is one of
+    the documented classes, and every gene resolves to something or reads as
+    honestly unannotated" -- a typo here would silently misclassify a real
+    figure.
+    """
     template = Path(__file__).resolve().parents[1] / "annotations" / "gene_pathway.csv"
     if not template.exists():
         pytest.skip("template not present")
-    assert len(AnnotationTable.load(template)) == 0
+    table = AnnotationTable.load(template)
+    assert len(table) > 0
+    documented = {
+        "Cell wall (PBP 1)", "Cell wall (PBP 2)", "Cell wall (PBP 3)",
+        "Gyrase", "Ribosome", "Membrane integrity", "RNA polymerase",
+        "DNA synthesis", "Control", "Folate synthesis", "Cell division",
+        "Protein secretion",
+    }
+    assert set(table.values) <= documented
+    # The genes this project actually screens (see go_analysis.R's own
+    # config) must all resolve -- an unannotated one would draw grey with
+    # no visible reason on a real figure.
+    for gene in ("gyrA", "gyrB", "parC", "parE", "rpoA", "rpoB", "ftsZ"):
+        assert table.get(gene) != UNANNOTATED
 
 
 # -- embedding loading ------------------------------------------------------

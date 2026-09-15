@@ -50,8 +50,8 @@ from PySide6.QtWidgets import (
 from ..data.annotations import (
     UNANNOTATED,
     AnnotationTable,
-    find_default_moa,
     find_default_pathway,
+    load_default_moa,
     load_or_empty,
 )
 from ..data.embeddings import (
@@ -598,7 +598,10 @@ class EmbeddingExplorer(QWidget):
         self._resolve_signals.ambiguous.connect(self._on_resolver_ambiguous)
 
         search_roots = [Path(__file__).resolve().parents[2]]
-        self.moa_table = load_or_empty(find_default_moa(search_roots))
+        # Layered, not first-match: a PLATO-local drug_moa.csv correction or
+        # addition and the lab's own AI4AB table combine, rather than the
+        # local file's mere existence hiding everything AI4AB has right.
+        self.moa_table = load_default_moa(search_roots)
         self.pathway_table = load_or_empty(find_default_pathway(search_roots))
 
         self._build_ui()

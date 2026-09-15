@@ -276,17 +276,38 @@ class AnnotationTable:
     def empty(cls) -> AnnotationTable:
         return cls()
 
+    def merged_with(self, other: AnnotationTable) -> AnnotationTable:
+        """This table's entries, plus anything ``other`` has that this does not.
+
+        ``add`` is first-writer-wins (``setdefault``), so calling this on the
+        table you want to take PRIORITY is what makes it a layer rather than
+        a replacement: a PLATO-local drug_moa.csv correcting or extending a
+        few drugs still falls back to AI4AB's validated table for everything
+        it does not mention, instead of silently losing the rest the moment
+        the local file exists at all.
+        """
+        merged = AnnotationTable(source=self.source)
+        merged._by_key.update(self._by_key)
+        for key, value in other._by_key.items():
+            merged._by_key.setdefault(key, value)
+        return merged
+
 
 # Where to look for annotation tables when the user has not chosen a file.
 #
-# The MoA candidates are the lab's own validated tables from the AI4AB
-# project, which sits beside PLATO on this machine. Reusing them rather than
-# shipping a copy means one table stays authoritative: correcting a drug's MoA
-# there fixes it here too.
+# Listed in PRIORITY order, highest first, and every one that exists is
+# layered together (see load_default_moa) rather than only the first found --
+# annotations/drug_moa.csv exists so a drug missing from, or wrong in, the
+# lab's AI4AB table can be corrected or added locally without touching that
+# table or losing everything else it already has right. The AI4AB tables
+# themselves are the lab's own validated data, from the sibling project that
+# sits beside PLATO on this machine; reusing them rather than shipping a copy
+# means correcting a drug's MoA there fixes it here too.
 #
-# The pathway candidate is a template shipped with PLATO, deliberately blank
-# (see annotations/gene_pathway.csv). Nothing is invented if neither is found;
-# the column simply reads as unannotated.
+# The pathway candidate is a template shipped with PLATO. It ships filled in
+# for the CRISPRi genes this project actually screens (see the file's own
+# header for provenance); a gene not in it simply reads as unannotated
+# rather than something being invented for it.
 DEFAULT_MOA_CANDIDATES = (
     Path("annotations/drug_moa.csv"),
     Path("../AI4AB/analysis/E_coli_params/moa_dict_inv.json"),
@@ -307,7 +328,30 @@ def _find(search_roots: list[Path], candidates) -> Path | None:
     return None
 
 
+def _find_all(search_roots: list[Path], candidates) -> list[Path]:
+    """Every candidate that exists, in priority order, first root first.
+
+    Distinct from ``_find``: that stops at the first match, which is right
+    for the pathway table (one template, nothing to layer) but wrong for MoA,
+    where a PLATO-local correction and the lab's validated table are meant to
+    combine rather than have one hide the other.
+    """
+    found = []
+    for root in search_roots:
+        for relative in candidates:
+            candidate = (root / relative).resolve()
+            if candidate.exists():
+                found.append(candidate)
+    return found
+
+
 def find_default_moa(search_roots: list[Path]) -> Path | None:
+    """The single highest-priority MoA file, if any exists.
+
+    Kept for callers that only want one file (or a path to show the user);
+    ``load_default_moa`` is what the explorer actually loads from, since a
+    single "first found" path cannot express layering several sources.
+    """
     return _find(search_roots, DEFAULT_MOA_CANDIDATES)
 
 
@@ -328,3 +372,24 @@ def load_or_empty(path: Path | None) -> AnnotationTable:
         return AnnotationTable.load(path)
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
         return AnnotationTable.empty()
+
+
+def load_default_moa(search_roots: list[Path]) -> AnnotationTable:
+    """Every MoA source that exists, layered highest-priority first.
+
+    A drug named in more than one source keeps the value from whichever
+    source is earlier in DEFAULT_MOA_CANDIDATES -- a PLATO-local
+    drug_moa.csv wins over AI4AB's table for a drug it names, and AI4AB's
+    table is still consulted for every drug the local file does not
+    mention. One malformed file degrades to being skipped, same as
+    load_or_empty, rather than losing every other source along with it.
+    """
+    table = AnnotationTable.empty()
+    for path in reversed(_find_all(search_roots, DEFAULT_MOA_CANDIDATES)):
+        # Lowest priority first, so each merged_with layers a HIGHER-priority
+        # source on top -- merged_with keeps its own caller's entries and
+        # only fills gaps from the argument, so the last merge (the
+        # highest-priority file) has to be the one calling it.
+        loaded = load_or_empty(path)
+        table = loaded.merged_with(table)
+    return table
