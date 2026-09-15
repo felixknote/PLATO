@@ -45,6 +45,14 @@ CONTROL_KIND = "control_kind"
 PERTURBATION = "perturbation"
 IMAGE_NAME = "image_name"
 IMAGE_PATH = "image_path"
+# A trained classifier's own verdict on this row, carried through only when
+# the source dataset is a Learned_Embeddings fold -- see
+# plato.data.learned_embeddings. Absent for every other export, which is
+# what keeps these off the dropdown for datasets that never made a
+# prediction to begin with.
+PREDICTED_LABEL = "predicted_label"
+PROB_TRUE = "prob_true"
+CORRECT = "correct"
 
 # Source columns that may carry the condition string, best first. Datasets
 # name it differently depending on which export wrote them.
@@ -68,6 +76,12 @@ FIELD_LABELS = {
     # Experiment arm. This is the perturbation's NAME, whichever kind it is,
     # so CRISPRi and antibiotic points share one field at ~38 values.
     PERTURBATION: "Perturbation (which gene or drug)",
+    PREDICTED_LABEL: "Predicted label",
+    # Short enough to sit whole in the count label above the plot, which
+    # does not elide -- "Confidence (predicted probability of the true
+    # label)" clipped there mid-word ("...the tru...").
+    PROB_TRUE: "Confidence",
+    CORRECT: "Correct",
     **plate_location.FIELD_LABELS,
 }
 
@@ -86,6 +100,12 @@ COLOUR_FIELDS = (
     EXPERIMENT,
     PLATE,
     WELL,
+    # A trained model's own predictions, once one exists to show -- grouped
+    # with the biological fields above rather than plate geometry, since
+    # "where does it fail" is a question about the condition, not the well.
+    PREDICTED_LABEL,
+    CORRECT,
+    PROB_TRUE,
     # Plate geometry last: these answer "where was it", not "what was in it",
     # and are what you reach for once a biological encoding looks suspicious.
     plate_location.WELL_ROW,
@@ -105,6 +125,8 @@ FILTER_FIELDS = (
     CONCENTRATION,
     PLATE,
     GUIDE,
+    CORRECT,
+    PREDICTED_LABEL,
 )
 
 
@@ -171,7 +193,23 @@ class ImageResolver:
         a plate, an incremental delivery) -- adding a second folder should
         resolve more rows, not replace the first folder's matches.
         """
-        index = self.index.merged_with(other.index)
+        return self._with_index(self.index.merged_with(other.index), frame, samples=samples)
+
+    def reprobed_against(self, frame: pd.DataFrame, *, samples: int = 24) -> ImageResolver:
+        """The same roots, re-scored against a DIFFERENT frame.
+
+        A resolver's report describes how well it covers the frame it was
+        built or last probed against. Reusing one root for a second, larger
+        frame -- e.g. a joint entry inheriting a source entry's resolver
+        as-is when only one source is resolved -- needs a fresh report
+        against that frame's own rows and row count, or the row would show
+        the source's match fraction mislabelled as the joint entry's own.
+        """
+        return self._with_index(self.index, frame, samples=samples)
+
+    def _with_index(
+        self, index: ImageIndex, frame: pd.DataFrame, *, samples: int = 24
+    ) -> ImageResolver:
         hints = hint_columns(frame, exclude=(IMAGE_NAME,)) if frame is not None else self.hints
         report = (
             probe(index, frame, name_column=self.name_column, hints=hints, samples=samples)
@@ -287,6 +325,16 @@ def build_frame(
     # what keeps the options off the dropdown for a dataset that has no
     # plate geometry to speak of.
     plate_location.add_columns(frame, WELL)
+
+    # A trained model's predictions, carried straight through when the source
+    # dataset has them (a Learned_Embeddings fold) -- nothing to derive, they
+    # are already one value per row in the same column names the loader
+    # wrote. Absent source columns leave these off the frame entirely rather
+    # than filling them with "", which is what keeps them off the colour-by
+    # and filter dropdowns for every dataset that never made a prediction.
+    for column in (PREDICTED_LABEL, PROB_TRUE, CORRECT):
+        if column in source.columns:
+            frame[column] = source[column].astype(str).str.strip()
 
     resolver = ImageResolver.detect(image_root, frame) if image_root else None
     return frame, resolver

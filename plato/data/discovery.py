@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .embeddings import METADATA_FILENAME, is_dataset_dir
+from .learned_embeddings import is_fold_dir
 
 # Extensions a plate's image folder is expected to contain. Matched
 # case-insensitively; sampling a handful of files is enough to tell "this is
@@ -114,6 +115,25 @@ def _row_count_hint(directory: Path) -> str:
         return ""
 
 
+def _fold_row_count_hint(directory: Path) -> str:
+    """A cheap image count for a fold, from the index JSON's own length.
+
+    Deliberately does not load the ``.npy`` array -- that is the expensive
+    part of a fold (hundreds of MB of float16), and a scan exists precisely
+    to avoid paying costs like that before anything is chosen to load.
+    """
+    import json
+
+    from .learned_embeddings import INDEX_SUFFIX
+
+    index_path = directory / INDEX_SUFFIX.format(plate=directory.name)
+    try:
+        records = json.loads(index_path.read_text(encoding="utf-8", errors="ignore"))
+        return f"{len(records):,} images"
+    except (OSError, ValueError):
+        return ""
+
+
 def _image_count_hint(directory: Path) -> str:
     count = 0
     try:
@@ -154,6 +174,11 @@ def _scan_one(root: Path, depth: int, budget: _Budget, out: list[Found]) -> None
         out.append(Found(root, EMBEDDING, _row_count_hint(root)))
         # Do not descend: an export's own directory holds only its metadata
         # and vectors, never a nested dataset worth finding.
+        return
+
+    if is_fold_dir(root):
+        out.append(Found(root, EMBEDDING, _fold_row_count_hint(root)))
+        # Same reasoning: a fold's own directory holds only its own files.
         return
 
     if looks_like_image_folder(root):

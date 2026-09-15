@@ -230,6 +230,16 @@ def hint_columns(frame: pd.DataFrame, *, exclude: tuple[str, ...] = ()) -> list[
     Every string column except the file name itself and anything the caller
     excludes. No column names are assumed, because every export names things
     differently.
+
+    A column with exactly one distinct value is still offered: it cannot
+    separate one ROW from another, but disambiguation compares a row's hint
+    values against several CANDIDATE PATHS, and a dataset that only ever
+    covers one plate (a Learned_Embeddings fold, a single-plate export) is
+    precisely the case where the plate column is constant across the frame
+    but still the one thing that tells "P1/Well...tiff" apart from
+    "P2/Well...tiff" for a name every plate happens to share. Only a column
+    with a value on EVERY row (the file name itself, or an identifier) is
+    excluded, since that is never a folder-level hint.
     """
     out = []
     for column in frame.columns:
@@ -237,9 +247,9 @@ def hint_columns(frame: pd.DataFrame, *, exclude: tuple[str, ...] = ()) -> list[
             continue
         values = frame[column].astype(str)
         distinct = values[values.ne("")].nunique()
-        # A column with one value cannot separate anything; one with a value
-        # per row (the file name) is not a folder hint.
-        if 1 < distinct < max(2, len(frame) // 2):
+        # A value per row (the file name) is not a folder hint; the constant
+        # case is handled above the loop's comment, not screened out here.
+        if 1 <= distinct < max(2, len(frame) // 2):
             out.append(str(column))
     return out
 

@@ -108,11 +108,26 @@ def is_dataset_dir(directory: Path) -> bool:
 
 
 def discover_datasets(root: Path) -> list[Path]:
-    """Every embedding dataset directory under ``root``, root itself included."""
+    """Every embedding dataset directory under ``root``, root itself included.
+
+    Also recognises ``fold_Plate_N`` directories (see
+    ``plato.data.learned_embeddings``) alongside ordinary exports, so
+    pointing this at a Learned_Embeddings run directory lists its folds the
+    same way pointing it at a DINO parent lists its exports. Checked here
+    rather than folded into ``is_dataset_dir`` itself, because a fold is not
+    a DINO export and callers that need to tell them apart (to pick which
+    loader to call) still can, via ``learned_embeddings.is_fold_dir``.
+    """
+    from . import learned_embeddings
+
     if not root.is_dir():
         return []
-    found = [root] if is_dataset_dir(root) else []
-    found.extend(sorted(p for p in root.iterdir() if p.is_dir() and is_dataset_dir(p)))
+
+    def _matches(p: Path) -> bool:
+        return is_dataset_dir(p) or learned_embeddings.is_fold_dir(p)
+
+    found = [root] if _matches(root) else []
+    found.extend(sorted(p for p in root.iterdir() if p.is_dir() and _matches(p)))
     return found
 
 
@@ -142,8 +157,19 @@ def load_dataset(directory: Path, name: str | None = None) -> EmbeddingDataset:
     Raises ``EmbeddingError`` -- naming the exact missing path -- rather than
     returning something half-loaded. An explorer with no vectors is not a
     degraded view, it is a blank one, and the reason has to reach the user.
+
+    Dispatches to ``learned_embeddings.load_fold`` for a ``fold_Plate_N``
+    directory -- a different file layout entirely (see that module) -- so
+    every caller that already calls ``load_dataset`` on "whatever directory
+    the user picked" handles both kinds without knowing which one it got.
     """
     directory = Path(directory)
+
+    from . import learned_embeddings
+
+    if learned_embeddings.is_fold_dir(directory):
+        return learned_embeddings.load_fold(directory, name=name)
+
     metadata_path = directory / METADATA_FILENAME
     if not metadata_path.exists():
         raise EmbeddingError(f"no {METADATA_FILENAME} in {directory}")
