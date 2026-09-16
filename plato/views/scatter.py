@@ -408,6 +408,7 @@ class EmbeddingScatter(QWidget):
         legend_values: list[str] | None = None,
         emphasise: np.ndarray | None = None,
         reset_view: bool = True,
+        outline_count: int | None = None,
     ) -> None:
         """Draw ``coords``, coloured per point, batched by colour group.
 
@@ -423,6 +424,13 @@ class EmbeddingScatter(QWidget):
                 cannot be parsed back into a value -- this is what a legend
                 click resolves against to build a filter. None (the facet
                 grid's own legend, which is not clickable) disables clicking.
+            outline_count: the point count OUTLINE_LIMIT is measured against,
+                if different from ``len(coords)``. A single plot has nothing
+                to be inconsistent with, so it is left as None there; the
+                facet grid passes the largest facet's count so every panel in
+                one grid makes the SAME outline decision -- a panel just under
+                the limit must not look different from its denser neighbour
+                only because it happens to have fewer points of its own.
             emphasise: boolean mask of points to draw larger, outlined and on
                 top. Marked controls use this: a control is the reference
                 every other point is judged against, and at 3 px inside a
@@ -458,9 +466,12 @@ class EmbeddingScatter(QWidget):
             for colour in dict.fromkeys(colours):
                 groups[colour] = np.flatnonzero(palette == colour)
 
+        count_for_outline = (
+            outline_count if outline_count is not None else len(self._coords)
+        )
         outline = (
             pg.mkPen(IMAGE_BACKGROUND, width=0.5)
-            if len(self._coords) <= OUTLINE_LIMIT
+            if count_for_outline <= OUTLINE_LIMIT
             else None
         )
         alpha = int(max(0.0, min(1.0, opacity)) * 255)

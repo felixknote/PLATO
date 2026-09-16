@@ -177,7 +177,16 @@ class PreviewPane(QWidget):
 
         self.image_label.setPixmap(QPixmap())
         self.image_label.setText("loading…")
-        self._pool.start(_PreviewTask(self._generation, row_index, path, self._signals))
+        # High priority: this pool is shared with Image statistics, which can
+        # queue tens of thousands of chunks for a large joint entry. Without
+        # this a hover/selection preview submitted after that queue fills up
+        # waits behind ALL of them -- worker threads run queued tasks in
+        # priority order, not FIFO, so the preview jumps straight to the
+        # front instead of going quiet for however long the stats pass takes.
+        self._pool.start(
+            _PreviewTask(self._generation, row_index, path, self._signals),
+            priority=1,
+        )
 
     # -- worker results ----------------------------------------------------
 

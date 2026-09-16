@@ -185,3 +185,45 @@ def empty(n_rows: int) -> dict[str, np.ndarray]:
     return {
         name: np.full(n_rows, np.nan, dtype=np.float32) for name in STAT_NAMES
     }
+
+
+def splice_from_sources(
+    entry, workspace, cache: StatsCache
+) -> tuple[dict[str, np.ndarray], list[int]]:
+    """A joint entry's stats, filled in wherever a source already has them.
+
+    A joint entry's rows are exactly its sources' rows concatenated in order
+    (see plato.data.joint_projection.JointSource), so a source dataset that
+    was already measured on its own has nothing left to remeasure for the
+    span of joint rows it contributed -- copying its cached values in is
+    free, and correct because the row order is guaranteed rather than
+    inferred. Only a SOURCE_JOINT entry has anything to splice; anything
+    else gets back ``empty(n_points)`` and every row still to do.
+
+    Returns ``(values, missing_rows)``: full ``n_points``-length arrays with
+    every known value already in place, and the positions still NaN because
+    no source's cache covered them -- exactly what the caller still needs to
+    read pixels for.
+    """
+    from .workspace import SOURCE_JOINT
+
+    n_points = entry.n_points
+    values = empty(n_points)
+    if entry.source != SOURCE_JOINT:
+        return values, list(range(n_points))
+
+    keys = entry.info.get("source_keys") or []
+    counts = entry.info.get("source_counts") or []
+    position = 0
+    for key, count in zip(keys, counts):
+        source = workspace.get(key)
+        if source is not None:
+            cached = cache.load(source.dataset.fingerprint(), count)
+            if cached is not None:
+                for name in STAT_NAMES:
+                    values[name][position : position + count] = cached[name]
+        position += count
+
+    first = values[STAT_NAMES[0]]
+    missing = np.flatnonzero(~np.isfinite(first)).tolist()
+    return values, missing

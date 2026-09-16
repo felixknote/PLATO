@@ -169,17 +169,27 @@ class ImageResolver:
 
     @classmethod
     def for_root(
-        cls, root: Path, frame: pd.DataFrame, *, samples: int = 24
+        cls,
+        root: Path,
+        frame: pd.DataFrame,
+        *,
+        samples: int = 24,
+        on_progress=None,
     ) -> ImageResolver:
         """Index ``root`` and report how well it matches, match or not.
 
         Unlike :meth:`detect` this always returns a resolver, so a caller can
         explain *why* a folder did not work instead of only that it did not.
+
+        ``on_progress``, when given, is passed straight to
+        ``ImageIndex.build`` -- see there for when it fires. Scanning a real
+        network-share root can take minutes; without this a caller has
+        nothing to show but silence for the whole wait.
         """
         root = Path(root)
         if frame is None or frame.empty or IMAGE_NAME not in frame.columns:
             return cls(root=root, index=ImageIndex(root=root))
-        index = ImageIndex.build(root)
+        index = ImageIndex.build(root, on_progress=on_progress)
         hints = hint_columns(frame, exclude=(IMAGE_NAME,))
         report = probe(
             index, frame, name_column=IMAGE_NAME, hints=hints, samples=samples

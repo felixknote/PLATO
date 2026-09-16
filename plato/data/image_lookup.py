@@ -73,10 +73,29 @@ def _tokens(value: str) -> list[str]:
     return [t for t in re.split(r"[^A-Za-z0-9]+", str(value).lower()) if t]
 
 
+# How often a scan reports its progress, in files. A network share walk can
+# run for minutes (measured: ~12 minutes for the six roots of a real joint
+# entry), and without a signal that long wait is indistinguishable from a
+# hang. Reported per batch rather than per file so the callback cost stays
+# nothing next to the walk itself.
+PROGRESS_EVERY = 2_000
+
+
 def _walk_into(
-    root: Path, by_stem: dict[str, list[Path]], *, seen: int, max_files: int
+    root: Path,
+    by_stem: dict[str, list[Path]],
+    *,
+    seen: int,
+    max_files: int,
+    on_progress=None,
 ) -> tuple[int, bool]:
-    """Add every image file under ``root`` to ``by_stem``. Returns (seen, truncated)."""
+    """Add every image file under ``root`` to ``by_stem``. Returns (seen, truncated).
+
+    ``on_progress``, when given, is called as ``on_progress(root, seen)``
+    every ``PROGRESS_EVERY`` files so a caller can say how far along a long
+    scan is. It is never called for a scan that finishes inside one batch,
+    which is the common case and wants no UI churn.
+    """
     root_depth = len(root.parts)
     for current, directories, files in os.walk(root):
         here = Path(current)
@@ -91,6 +110,8 @@ def _walk_into(
                 continue
             by_stem[stem].append(here / name)
             seen += 1
+            if on_progress is not None and seen % PROGRESS_EVERY == 0:
+                on_progress(root, seen)
             if seen >= max_files:
                 return seen, True
     return seen, False
@@ -125,10 +146,14 @@ class ImageIndex:
         return sum(len(v) for v in self.by_stem.values())
 
     @classmethod
-    def build(cls, root: Path, *, max_files: int = MAX_FILES) -> ImageIndex:
+    def build(
+        cls, root: Path, *, max_files: int = MAX_FILES, on_progress=None
+    ) -> ImageIndex:
         root = Path(root)
         by_stem: dict[str, list[Path]] = defaultdict(list)
-        seen, truncated = _walk_into(root, by_stem, seen=0, max_files=max_files)
+        seen, truncated = _walk_into(
+            root, by_stem, seen=0, max_files=max_files, on_progress=on_progress
+        )
         return cls(root=root, by_stem=dict(by_stem), truncated=truncated)
 
     def merged_with(self, other: ImageIndex) -> ImageIndex:

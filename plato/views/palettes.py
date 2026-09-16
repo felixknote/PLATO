@@ -100,16 +100,24 @@ _BRIGHT = (
 
 # Deep-toned set for light/white backgrounds. _PLATO's mid-saturation hues
 # are tuned for a dark ground (see palette.py's own docstring) and read
-# washed out on white -- 17 of its 20 colours fall below WCAG's 3:1 minimum
-# contrast for graphical objects against white. Same hue order and count as
-# _PLATO so switching between them for a background change keeps each value
-# in the same relative position, just darkened. The six chrome-avoiding hue
-# shifts above are mirrored here for the same reason.
+# washed out on white. Same hue order and count as _PLATO so switching
+# between them for a background change keeps each value in the same relative
+# position; the six chrome-avoiding hue shifts above are mirrored here for
+# the same reason -- only saturation and lightness move, hue does not.
+#
+# Each entry keeps _PLATO's own hue and is pushed to the most saturated,
+# lightest version of it that still clears 3.2:1 contrast against white
+# (WCAG's 3:1 graphical-object minimum plus a small margin) -- the earlier
+# version of this set darkened every hue by a fixed amount instead, well
+# past what the contrast floor required, which is why it read dull/muddy on
+# screen rather than merely darker. Regenerate with the same method (push
+# saturation, binary-search lightness against relative_luminance) rather than
+# hand-tuning a colour that reads dull again.
 _DEEP = (
-    "#1f6fb2", "#c9700a", "#1f8f44", "#c23a58", "#6b4a9e",
-    "#4d7a1f", "#b1461f", "#741a8f", "#53a24f", "#8a7a1f",
-    "#3f5fa8", "#a1462a", "#217a5f", "#93446c", "#5a7a1f",
-    "#342c91", "#a5701f", "#4c5cab", "#6f8a1f", "#b1504f",
+    "#2991fd", "#d07c00", "#16a646", "#ff4e6d", "#a578f2",
+    "#52a219", "#ff5512", "#d25bf5", "#1ca715", "#a29015",
+    "#5f8eea", "#f4603a", "#20a37c", "#d76ca2", "#789c1e",
+    "#8b83ea", "#d67806", "#6d89f5", "#7e9b11", "#f25f5f",
 )
 
 # -- sequential --------------------------------------------------------------

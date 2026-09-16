@@ -51,16 +51,32 @@ class StatsSignals(QObject):
 class StatsRun:
     """Shared state for one measuring pass across many chunk tasks."""
 
-    def __init__(self, n_rows: int, signals: StatsSignals) -> None:
+    def __init__(
+        self,
+        n_rows: int,
+        signals: StatsSignals,
+        *,
+        seed: dict[str, np.ndarray] | None = None,
+    ) -> None:
         self.signals = signals
         self.n_rows = n_rows
         self.cancelled = False
         self._lock = threading.Lock()
         self._done = 0
         self._remaining = 0
-        self.values = {
-            name: np.full(n_rows, np.nan, dtype=np.float32) for name in STAT_NAMES
-        }
+        if seed is not None:
+            # Values already known -- e.g. a joint entry's rows that a source
+            # dataset already measured -- copied rather than reused directly,
+            # so a worker task writing into self.values can never alias the
+            # caller's own cached array.
+            self.values = {
+                name: np.array(seed[name], dtype=np.float32, copy=True)
+                for name in STAT_NAMES
+            }
+        else:
+            self.values = {
+                name: np.full(n_rows, np.nan, dtype=np.float32) for name in STAT_NAMES
+            }
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -113,13 +129,25 @@ class StatsTask(QRunnable):
         self._run.chunk_finished(measured)
 
 
-def start(pool, rows: list[int], paths: list, n_rows: int, signals: StatsSignals) -> StatsRun:
-    """Queue the whole pass and return its handle.
+def start(
+    pool,
+    rows: list[int],
+    paths: list,
+    n_rows: int,
+    signals: StatsSignals,
+    *,
+    seed: dict[str, np.ndarray] | None = None,
+) -> StatsRun:
+    """Queue a pass over ``rows`` and return its handle.
 
     ``rows`` and ``paths`` are parallel: paths[i] is where rows[i] lives, or
-    None when the image was not found.
+    None when the image was not found. ``rows`` need not be every row in the
+    dataset -- pass ``seed`` (full ``n_rows``-length arrays, e.g. a joint
+    entry's stats spliced from its sources' own caches) to start from known
+    values and only measure what genuinely is not there yet; rows outside
+    ``rows`` keep whatever ``seed`` gave them instead of turning to NaN.
     """
-    run = StatsRun(n_rows, signals)
+    run = StatsRun(n_rows, signals, seed=seed)
     size = chunk_size(len(rows))
     chunks = [
         (rows[i : i + size], paths[i : i + size]) for i in range(0, len(rows), size)

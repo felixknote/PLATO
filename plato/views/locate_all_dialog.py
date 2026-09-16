@@ -33,10 +33,56 @@ from PySide6.QtWidgets import (
 from PySide6.QtWidgets import QDialog as _QDialog
 
 from ..data.explorer_model import ImageResolver
-from ..data.workspace import EmbeddingEntry
+from ..data.workspace import SOURCE_JOINT, EmbeddingEntry
 from ..gui import themes
 
 MAX_SUGGESTIONS = 8
+
+
+def _inherited_resolver(
+    entry: EmbeddingEntry, resolver_for: dict[str, ImageResolver]
+) -> tuple[ImageResolver, list[str]] | None:
+    """A joint entry's resolver, folded from its sources' resolvers.
+
+    A joint entry's rows are exactly its sources' rows concatenated, so once
+    every source dataset's images are found there is nothing left to locate
+    by hand -- the answer is "all of the folders already found for the
+    entries this was built from," which is precisely what combined_with
+    already does for a dataset split across several folders.
+
+    ``resolver_for`` is keyed by entry key and passed in rather than read off
+    each source EmbeddingEntry directly, because inside the dialog the
+    authoritative answer is a row's pending_resolver -- which may already be
+    ahead of entry.resolver if the user just resolved that row in this same
+    session, before accepting the dialog. Only sources present in the map
+    with a resolver contribute; a source missing or still unresolved just
+    makes the fold partial, which the returned resolver's own report
+    (probed against the joint frame) will say honestly.
+
+    Returns None for a non-joint entry, or a joint entry with nothing yet to
+    inherit -- the caller then falls back to asking the user, same as today.
+    Otherwise returns the folded resolver plus the names of the sources it
+    came from, for the row's status text.
+    """
+    if entry.source != SOURCE_JOINT:
+        return None
+    keys = entry.info.get("source_keys") or []
+    names = entry.info.get("source_names") or []
+    by_key_name = dict(zip(keys, names))
+    available = [k for k in keys if resolver_for.get(k) is not None]
+    if not available:
+        return None
+    combined = resolver_for[available[0]]
+    for key in available[1:]:
+        combined = combined.combined_with(resolver_for[key], entry.frame)
+    # Even a single source's resolver has to be re-probed against the JOINT
+    # frame, not left with its report from the source's own (smaller) frame
+    # -- otherwise the row would show the source's match fraction, over the
+    # source's row count, mislabelled as the joint entry's own result.
+    if len(available) == 1:
+        combined = combined.reprobed_against(entry.frame)
+    source_names = [by_key_name.get(k, k) for k in available]
+    return combined, source_names
 
 
 class _ScanSignals(QObject):
@@ -102,6 +148,12 @@ class _EntryRow(QWidget):
         # resolver, which is only updated when the whole dialog is accepted,
         # so cancelling the dialog leaves every entry exactly as it was.
         self.pending_resolver: ImageResolver | None = entry.resolver
+        # True only while pending_resolver came from set_inherited and has
+        # never been touched by the user. A source resolving further (a
+        # second arm found after the first) should freely improve this row's
+        # inherit; anything the user chose (a scan, or an inherit they kept
+        # by opening the dialog again later) must never be silently replaced.
+        self._auto_inherited = False
 
         self.name_label = QLabel(f"<b>{entry.label()}</b>")
         self.name_label.setWordWrap(True)
@@ -206,6 +258,7 @@ class _EntryRow(QWidget):
         label = self._roots_label(resolver)
         if report.ok:
             self.pending_resolver = resolver
+            self._auto_inherited = False
             self.add_folder_button.setVisible(True)
             self.add_folder_button.setEnabled(True)
             percent = report.fraction * 100
@@ -227,6 +280,33 @@ class _EntryRow(QWidget):
         self.add_folder_button.setEnabled(self.pending_resolver is not None)
         self.status_label.setText(f"✗ {label}\n{report.describe()}.")
         self._offer_neighbours(resolver.root)
+
+    def set_inherited(self, resolver: ImageResolver, source_names: list[str]) -> None:
+        """A joint row's resolver, folded from its already-resolved sources.
+
+        Distinct wording from set_result: nothing was scanned for THIS row --
+        the folders came from the entries it was built from, so the status
+        says whose work is being reused rather than implying a folder was
+        just picked.
+        """
+        self.pending_resolver = resolver
+        self._auto_inherited = True
+        self.add_folder_button.setVisible(True)
+        self.add_folder_button.setEnabled(True)
+        report = resolver.report
+        names = " + ".join(source_names)
+        if report is None or not report.ok:
+            self.status_label.setText(
+                f"Inherited from {names}, but that does not cover this "
+                "combination's rows. Choose a folder to add what is missing."
+            )
+            return
+        percent = report.fraction * 100
+        mark = "✓" if percent >= 95 else "⚠"
+        self.status_label.setText(
+            f"{mark} Inherited from {names}\n"
+            f"{report.n_files:,} images, {percent:.0f}% of sampled rows resolved."
+        )
 
     def set_failed(self, message: str) -> None:
         self.progress.hide()
@@ -272,6 +352,7 @@ class LocateAllDialog(_QDialog):
         self._signals.done.connect(self._on_scanned)
         self._signals.failed.connect(self._on_failed)
         self._rows: dict[str, _EntryRow] = {}
+        self._entries_by_key = {entry.key: entry for entry in entries}
 
         intro = QLabel(
             "Choose the folder holding the raw microscopy images for each "
@@ -293,6 +374,13 @@ class LocateAllDialog(_QDialog):
             self._rows[entry.key] = row
             rows_layout.addWidget(row)
         rows_layout.addStretch(1)
+
+        # A joint entry combining already-resolved sources needs no folder
+        # dialog at all -- fill those rows in immediately, before the dialog
+        # is even shown, the same way _on_scanned does for one resolved
+        # mid-session below.
+        for entry in entries:
+            self._apply_inherited(entry)
 
         rows_container = QWidget()
         rows_container.setLayout(rows_layout)
@@ -360,6 +448,39 @@ class LocateAllDialog(_QDialog):
         row = self._rows.get(key)
         if row is not None:
             row.set_result(resolver, is_addition)
+        # A source entry just got (or improved) a resolver -- any joint row
+        # built from it may now be inheritable, or inheritable with a better
+        # match than before. Re-check every row rather than tracking which
+        # joint entries depend on this one key: with a handful of open
+        # embeddings this is a handful of dict lookups, not worth the extra
+        # bookkeeping of a reverse index.
+        for other_key, other_entry in self._entries_by_key.items():
+            if other_key != key:
+                self._apply_inherited(other_entry)
+
+    def _apply_inherited(self, entry: EmbeddingEntry) -> None:
+        """Pre-fill or refresh a joint row from its sources' CURRENT resolvers.
+
+        Skips a row the user has actually chosen a folder for (by hand, or
+        via "Add another folder...") -- that must never be silently replaced.
+        A row that only has a previous auto-inherit, though, is refreshed
+        freely: if the dialog is still open when a second source resolves,
+        the joint row should pick up the improvement immediately rather than
+        being stuck with the first, partial fold until the dialog is
+        reopened.
+        """
+        row = self._rows.get(entry.key)
+        if row is None or (row.pending_resolver is not None and not row._auto_inherited):
+            return
+        resolver_for = {
+            other_key: other_row.pending_resolver
+            for other_key, other_row in self._rows.items()
+        }
+        result = _inherited_resolver(entry, resolver_for)
+        if result is None:
+            return
+        resolver, source_names = result
+        row.set_inherited(resolver, source_names)
 
     def _on_failed(self, key: str, message: str) -> None:
         row = self._rows.get(key)

@@ -456,6 +456,10 @@ class SelectionPanel(QWidget):
             entry.set_failed()
             entry.image.setText("image not found")
             return
+        # High priority: this pool is shared with Image statistics, which can
+        # queue tens of thousands of chunks for a large joint entry -- see
+        # preview.py's PreviewPane.show_row for the same fix and why it
+        # matters (queued tasks run in priority order, not FIFO).
         self._pool.start(
             _CropTask(
                 self._generation,
@@ -464,7 +468,8 @@ class SelectionPanel(QWidget):
                 self._image_px,
                 self._cropped,
                 self._signals,
-            )
+            ),
+            priority=1,
         )
 
     def _on_ready(self, generation: int, row: int, pixmap: QPixmap) -> None:

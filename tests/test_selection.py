@@ -359,6 +359,79 @@ def test_a_cancelled_stats_run_delivers_nothing():
     assert delivered == []
 
 
+def test_a_seeded_run_starts_from_the_seed_not_from_nan():
+    """A joint entry's already-known rows (see image_stats.splice_from_sources)
+    must survive into the run's own values, not be reset to NaN just because
+    they were not part of THIS pass's rows/paths."""
+    from plato.data.image_stats import STAT_NAMES
+    from plato.views.stats_worker import StatsRun, StatsSignals
+
+    seed = {name: np.array([1.0, 2.0, 3.0], dtype=np.float32) for name in STAT_NAMES}
+    run = StatsRun(3, StatsSignals(), seed=seed)
+    assert list(run.values["brightness"]) == [1.0, 2.0, 3.0]
+
+
+def test_a_seeded_run_never_aliases_the_callers_seed_array():
+    """The worker writes into run.values by row index; if that array were
+    the same object as the caller's seed, a measurement would silently
+    corrupt whatever the caller (a source dataset's own cached array) still
+    holds a reference to."""
+    from plato.data.image_stats import STAT_NAMES
+    from plato.views.stats_worker import StatsRun, StatsSignals
+
+    seed = {name: np.array([1.0, 2.0], dtype=np.float32) for name in STAT_NAMES}
+    run = StatsRun(2, StatsSignals(), seed=seed)
+    run.values["brightness"][0] = 999.0
+    assert seed["brightness"][0] == 1.0
+
+
+def test_start_with_a_seed_only_measures_the_given_rows():
+    """The whole point: rows outside the ones passed in must keep the seed's
+    value rather than being reset to NaN or otherwise touched -- exactly the
+    rows a joint entry's splice already found in a source's own cache."""
+    from plato.data.image_stats import STAT_NAMES
+    from plato.views.stats_worker import StatsSignals, start
+
+    seed = {name: np.full(4, 5.0, dtype=np.float32) for name in STAT_NAMES}
+    # Row 2 is the one splice_from_sources found no cache for -- seeded NaN,
+    # same as empty() would give it, and the only one actually in rows/paths.
+    for name in STAT_NAMES:
+        seed[name][2] = np.nan
+    signals = StatsSignals()
+    delivered = []
+    signals.finished.connect(delivered.append)
+
+    pool = type("P", (), {"start": staticmethod(lambda task: task.run())})()
+    start(pool, [2], [None], 4, signals, seed=seed)
+
+    assert len(delivered) == 1
+    result = delivered[0]
+    assert list(result["brightness"][:2]) == [5.0, 5.0]
+    # Row 2's path is None (unresolved), so it stays exactly what the seed
+    # already had for it: NaN, not a fabricated measurement.
+    assert np.isnan(result["brightness"][2])
+    assert result["brightness"][3] == 5.0
+
+
+def test_start_with_no_rows_left_still_emits_the_seed_as_is():
+    """A joint entry whose every source is already cached has nothing left
+    to queue -- start's empty-chunks path must still deliver the seed rather
+    than silently doing nothing."""
+    from plato.data.image_stats import STAT_NAMES
+    from plato.views.stats_worker import StatsSignals, start
+
+    seed = {name: np.full(3, 8.0, dtype=np.float32) for name in STAT_NAMES}
+    signals = StatsSignals()
+    delivered = []
+    signals.finished.connect(delivered.append)
+
+    pool = type("P", (), {"start": staticmethod(lambda task: task.run())})()
+    start(pool, [], [], 3, signals, seed=seed)
+
+    assert len(delivered) == 1
+    assert list(delivered[0]["brightness"]) == [8.0, 8.0, 8.0]
+
+
 # -- image viewer on/off -----------------------------------------------------
 
 

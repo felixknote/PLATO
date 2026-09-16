@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QKeySequence, QShortcut, QStandardItem
 from PySide6.QtWidgets import (
     QStyle,
     QAbstractItemView,
@@ -99,6 +99,7 @@ from ..data.locations import (
     guess_data_library,
     set_root,
 )
+from ..data.resolver_store import ResolverStore, rebuild_resolver
 from ..data.projection import (
     METHODS,
     TSNE,
@@ -124,7 +125,7 @@ from .metadata_panel import MetadataPanel
 from .open_embeddings_list import OpenEmbeddingsList
 from .stats_panel import StatsPanel
 from .selection_panel import SelectionPanel
-from .scatter import BACKGROUND_CHOICES, EmbeddingScatter
+from .scatter import BACKGROUND_CHOICES, BACKGROUND_LIGHT, EmbeddingScatter
 from .group_dialog import GroupDialog
 from .section import Accordion
 
@@ -414,6 +415,12 @@ class _WarmUpTask(QRunnable):
 class _ResolveSignals(QObject):
     found = Signal(str, object)  # dataset key, ImageResolver | None
     ambiguous = Signal(str, list)
+    # dataset key, human-readable status ("scanning <root>: N files found").
+    # Shared by both the fresh hunt and the remembered-root rebuild below --
+    # either can run for minutes against a real network share, and without
+    # this a caller has nothing to show but static "looking…" text for the
+    # whole wait.
+    progress = Signal(str, str)
 
 
 class _ResolveTask(QRunnable):
@@ -452,6 +459,70 @@ class _ResolveTask(QRunnable):
         try:
             self._signals.ambiguous.emit(self._key, others)
             self._signals.found.emit(self._key, chosen)
+        except RuntimeError:
+            pass
+
+
+class _RememberedResolveTask(QRunnable):
+    """Re-scans a dataset's REMEMBERED roots without blocking the window.
+
+    A remembered root still has to be re-walked to confirm it (see
+    resolver_store's module docstring) -- that is exactly as expensive as the
+    fresh hunt above, measured at ~12 minutes across six real roots on a
+    network share. This used to run inline on the GUI thread inside
+    ``_apply_remembered_resolver``, despite that method's own docstring
+    promising it was "applied straight away": for any dataset with a
+    remembered root the window would simply freeze for however long the
+    share took to walk, then resurface. Routed through here instead, exactly
+    the way the fresh hunt already was.
+
+    ``fallback_candidates`` preserves the old behaviour for a remembered root
+    that has gone stale (moved, deleted, a share unmounted): rather than
+    surfacing "not found" for a dataset that used to resolve fine, this falls
+    through to the same candidate hunt ``_ResolveTask`` runs, in the same
+    background task rather than a second round trip through the thread pool.
+    """
+
+    def __init__(self, key, frame, roots, fallback_candidates, signals) -> None:
+        super().__init__()
+        self._key = key
+        self._frame = frame
+        self._roots = roots
+        self._fallback_candidates = fallback_candidates
+        self._signals = signals
+
+    def run(self) -> None:  # pragma: no cover - worker thread
+        def report(root, seen):
+            try:
+                self._signals.progress.emit(
+                    self._key, f"scanning {root}: {seen:,} files found…"
+                )
+            except RuntimeError:
+                pass
+
+        try:
+            resolver = rebuild_resolver(self._roots, self._frame, on_progress=report)
+        except Exception:  # noqa: BLE001 - a bad share must not kill the task
+            resolver = None
+
+        others: list = []
+        if resolver is None:
+            matches = []
+            try:
+                for candidate in self._fallback_candidates:
+                    found = ImageResolver.detect(candidate, self._frame)
+                    if found is not None:
+                        matches.append(found)
+                        if len(matches) >= _MAX_ROOTS_TRIED:
+                            break
+                resolver, others = _choose_resolver(matches, self._frame)
+            except Exception:  # noqa: BLE001 - a bad share must not kill the task
+                resolver, others = None, []
+
+        try:
+            if others:
+                self._signals.ambiguous.emit(self._key, others)
+            self._signals.found.emit(self._key, resolver)
         except RuntimeError:
             pass
 
@@ -537,8 +608,17 @@ class EmbeddingExplorer(QWidget):
         self.result = None
         self._visible_rows = np.empty(0, dtype=np.int64)
         # dataset directory -> resolver (or None). Scanning the data
-        # library is a directory walk; do it once per dataset.
+        # library is a directory walk; do it once per dataset PER SESSION --
+        # backed by resolver_store below for "once ever", across restarts.
         self._resolver_cache: dict[str, tuple[ImageResolver | None, list[str]]] = {}
+        # Which image root(s) were confirmed for each dataset directory,
+        # remembered across restarts: once Locate (or the automatic hunt)
+        # finds the right folder for a dataset, later sessions apply it
+        # straight away instead of re-hunting or re-asking. Locate's own
+        # "Choose folder..." still overrides it any time the connection
+        # genuinely needs to change; this only skips asking again when it
+        # does not.
+        self._resolver_store = ResolverStore(self.work_dir / "image_roots.json")
         # Other roots that matched this dataset equally well, if any.
         self.ambiguous_roots: list[str] = []
         # True while the background root hunt is running.
@@ -596,6 +676,12 @@ class EmbeddingExplorer(QWidget):
         self._resolve_signals = _ResolveSignals()
         self._resolve_signals.found.connect(self._on_resolver_found)
         self._resolve_signals.ambiguous.connect(self._on_resolver_ambiguous)
+        self._resolve_signals.progress.connect(self._on_resolver_progress)
+        # The most recent progress text for the dataset currently being
+        # hunted/rebuilt, shown by _update_source_label while _resolving is
+        # true. Cleared whenever a hunt starts or finishes so a stale message
+        # from a previous dataset never lingers on a new one.
+        self._resolving_status = ""
 
         search_roots = [Path(__file__).resolve().parents[2]]
         # Layered, not first-match: a PLATO-local drug_moa.csv correction or
@@ -827,6 +913,7 @@ class EmbeddingExplorer(QWidget):
         # --- display controls
         self.colour_box = QComboBox()
         self.colour_box.currentIndexChanged.connect(self.schedule_redraw)
+        self.colour_box.currentIndexChanged.connect(self._update_palette_fit)
 
         self.size_slider = QSlider(Qt.Orientation.Horizontal)
         self.size_slider.setRange(2, 16)
@@ -942,6 +1029,13 @@ class EmbeddingExplorer(QWidget):
             "Transparent exports with a real alpha channel, for dropping into "
             "a figure that has its own background."
         )
+        # White by default, not "Follow app theme": the app chrome is dark,
+        # but a plot meant for a figure or a print-out defaults to the ground
+        # most of those are viewed on. "Follow app theme" is one pick away
+        # for anyone who wants the plot to match the dark window around it.
+        default_background = self.background_box.findData(BACKGROUND_LIGHT)
+        if default_background >= 0:
+            self.background_box.setCurrentIndex(default_background)
         self.background_box.currentIndexChanged.connect(self._on_background_changed)
 
         self.grey_out_box = QCheckBox("Grey out unselected")
@@ -1129,6 +1223,10 @@ class EmbeddingExplorer(QWidget):
 
         # --- centre: the plot
         self.scatter = EmbeddingScatter()
+        # Match the background_box default set above -- the scatter's own
+        # BACKGROUND_THEME construction default would otherwise disagree with
+        # what the combo box shows until the user touched it once.
+        self.scatter.set_background(self.background_box.currentData())
         self.scatter.point_hovered.connect(self._on_hover)
         self.scatter.point_clicked.connect(self._on_point_clicked)
         self.scatter.point_activated.connect(self._on_click)
@@ -1444,6 +1542,10 @@ class EmbeddingExplorer(QWidget):
             # (or opening the same directory as a second embedding) does not
             # re-hunt for a root that was just found by hand.
             self._resolver_cache[str(entry.directory)] = (resolver, [])
+            # And the DURABLE half: a folder picked here, by hand, is
+            # exactly the connection that should not need re-picking next
+            # session -- see ResolverStore's own docstring.
+            self._remember_resolver(str(entry.directory), resolver)
             if remembered_root is None:
                 remembered_root = resolver.root
             if entry.key == self._active_key:
@@ -1470,9 +1572,16 @@ class EmbeddingExplorer(QWidget):
     def _update_source_label(self) -> None:
         """Say where previews come from, and whether that was a guess."""
         if self.resolver is None:
-            self.source_label.setText(
-                "looking…" if self._resolving else "not found — click Locate…"
-            )
+            if self._resolving:
+                # The scan's own progress once it has reported any, else the
+                # generic "looking…" for the moment before the first batch --
+                # this can be the whole story for many seconds on a network
+                # share, and static text for minutes at a time is what read
+                # as a stall before this existed.
+                text = self._resolving_status or "looking…"
+            else:
+                text = "not found — click Locate…"
+            self.source_label.setText(text)
             self.source_label.setToolTip("")
             return
 
@@ -1810,6 +1919,14 @@ class EmbeddingExplorer(QWidget):
         arrives on ``_on_resolver_found`` and the label updates. Until then
         previews say they are still looking, which is honest and costs the
         window nothing.
+
+        A REMEMBERED root (confirmed in a previous session) still has to be
+        re-walked to confirm it is still there -- exactly as expensive as the
+        fresh hunt below, measured at minutes on a real network share -- so
+        it goes through the same background-task path as a fresh hunt rather
+        than being read here on the GUI thread. Only the lookup of WHETHER
+        something is remembered (a dict read) happens inline; the walk itself
+        never does.
         """
         key = str(self.dataset.directory) if self.dataset is not None else ""
         if key and key in self._resolver_cache:
@@ -1818,62 +1935,59 @@ class EmbeddingExplorer(QWidget):
 
         self.ambiguous_roots = []
         self._resolving = True
-        QThreadPool.globalInstance().start(
-            _ResolveTask(key, frame, self._image_root_candidates(), self._resolve_signals)
-        )
+        self._resolving_status = ""
+        remembered_roots = self._resolver_store.roots_for(key) if key else None
+        if remembered_roots is not None:
+            QThreadPool.globalInstance().start(
+                _RememberedResolveTask(
+                    key,
+                    frame,
+                    remembered_roots,
+                    self._image_root_candidates(),
+                    self._resolve_signals,
+                )
+            )
+        else:
+            QThreadPool.globalInstance().start(
+                _ResolveTask(key, frame, self._image_root_candidates(), self._resolve_signals)
+            )
         return None
+
+    def _remember_resolver(self, key: str, resolver: ImageResolver | None) -> None:
+        """Persist a confirmed resolver so a later session applies it
+        automatically -- see ResolverStore's own docstring. Only a resolver
+        that actually resolved something is worth remembering; a None or a
+        failed one is not a connection to reapply next time."""
+        if key and resolver is not None:
+            self._resolver_store.remember(key, resolver.roots)
 
     def _on_resolver_ambiguous(self, key: str, others: list) -> None:
         if self.dataset is not None and key == str(self.dataset.directory):
             self.ambiguous_roots = others
 
+    def _on_resolver_progress(self, key: str, text: str) -> None:
+        """One scan batch finished -- see image_lookup.PROGRESS_EVERY."""
+        if self.dataset is None or key != str(self.dataset.directory):
+            return
+        self._resolving_status = text
+        self._update_source_label()
+
     def _on_resolver_found(self, key: str, resolver) -> None:
         """The background hunt finished."""
         if key:
             self._resolver_cache[key] = (resolver, self.ambiguous_roots)
+            # Confirmed once, by whatever process, is confirmed for next time
+            # too -- only the hunt's WINNING root is remembered, not the
+            # ambiguous runners-up, which were never actually chosen.
+            self._remember_resolver(key, resolver)
         # A different dataset may have been selected while we were looking.
         if self.dataset is None or key != str(self.dataset.directory):
             return
         self._resolving = False
+        self._resolving_status = ""
         self.resolver = resolver
         self._invalidate_paths()
         self._update_source_label()
-
-    def _resolve_images(self, frame) -> ImageResolver | None:
-        """Find a root under which THIS dataset's rows resolve.
-
-        Detection is run against the built frame, not guessed from paths: a
-        directory existing proves nothing, and every dataset comes from a
-        different screen.
-
-        Screens often share a filename convention -- NIS writes
-        ``WellA01_PointA01_0000_Channel....tiff`` for every plate of every
-        experiment -- so several roots can match one dataset equally well and
-        no heuristic can tell which is the right one. When that happens the
-        first is used and ``ambiguous_roots`` records the rest, so the UI can
-        say the choice was a guess instead of quietly showing images from the
-        wrong screen.
-
-        A partial match is the other case, and it is not ambiguity -- see
-        ``_choose_resolver``.
-        """
-        key = str(self.dataset.directory) if self.dataset is not None else ""
-        if key and key in self._resolver_cache:
-            resolver, self.ambiguous_roots = self._resolver_cache[key]
-            return resolver
-
-        matches: list[ImageResolver] = []
-        for candidate in self._image_root_candidates():
-            resolver = ImageResolver.detect(candidate, frame)
-            if resolver is not None:
-                matches.append(resolver)
-                if len(matches) >= _MAX_ROOTS_TRIED:
-                    break
-
-        chosen, self.ambiguous_roots = _choose_resolver(matches, frame)
-        if key:
-            self._resolver_cache[key] = (chosen, self.ambiguous_roots)
-        return chosen
 
     # -- controls ---------------------------------------------------------
 
@@ -2463,6 +2577,7 @@ class EmbeddingExplorer(QWidget):
         # this may no longer be the frame that was on screen when the legend
         # was built -- see _on_legend_value_clicked.
         self._legend_column = column
+        self._update_palette_fit()
         self._draw(
             coords,
             visible,
@@ -3130,6 +3245,56 @@ class EmbeddingExplorer(QWidget):
         # one, and the legend and the points disagree.
         if key != previous:
             self.schedule_redraw()
+        self._update_palette_fit()
+
+    def _update_palette_fit(self) -> None:
+        """Mark, in the dropdown itself, which categorical palettes are too
+        small for the field colour is currently encoding.
+
+        Picking one of these used to silently drop the legend -- correct
+        (a legend over wrapped colours would lie), but nothing said so until
+        after the pick, in a small muted toolbar line easy to miss next to a
+        legend box that had just vanished. Disabling the option up front (with
+        a tooltip explaining why) turns a surprise into a choice that was
+        never on offer, the same way a too-small font size is greyed out
+        rather than silently rendering nothing.
+        """
+        if self._stat_column is not None:
+            return  # Numeric colouring doesn't use a categorical palette.
+        colour_box = getattr(self, "colour_box", None)
+        if colour_box is None:
+            return
+        column = colour_box.currentData()
+        if not column:
+            return
+        needed = len(self._colour_universe(column))
+        model = self.palette_box.model()
+        for row in range(self.palette_box.count()):
+            key = self.palette_box.itemData(row)
+            info = palettes.get(key) if key else None
+            if info is None or info.kind != palettes.CATEGORICAL:
+                continue
+            size = len(info.colours)
+            item = model.item(row) if isinstance(model.item(row), QStandardItem) else None
+            fits = needed <= size
+            if item is not None:
+                item.setEnabled(fits)
+            base_name = info.name.split(" — ")[0]
+            if fits:
+                self.palette_box.setItemText(row, base_name)
+                self.palette_box.setItemData(row, info.description, Qt.ItemDataRole.ToolTipRole)
+            else:
+                self.palette_box.setItemText(
+                    row, f"{base_name} — too few colours ({size} < {needed})"
+                )
+                self.palette_box.setItemData(
+                    row,
+                    f"{info.description}\n\n{needed} values are on screen for "
+                    f"this field, more than this palette's {size} colours -- "
+                    "picking it would wrap colours across values and drop the "
+                    "legend, which would then be showing a false distinction.",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
 
     def _rebuild_shape_options(self) -> None:
         """Offer low-cardinality categoricals for shape."""
@@ -3437,7 +3602,7 @@ class EmbeddingExplorer(QWidget):
             )
             return
 
-        from ..data.image_stats import StatsCache
+        from ..data.image_stats import StatsCache, splice_from_sources
         from . import stats_worker
 
         n_rows = len(self.frame)
@@ -3448,13 +3613,29 @@ class EmbeddingExplorer(QWidget):
             self._apply_image_stats(cached, from_cache=True)
             return
 
+        # A joint entry's rows are its sources' rows concatenated, so any
+        # source already measured on its own needs no remeasuring -- splice
+        # in whatever its cache already has, and only read pixels for rows
+        # no source's cache covered. For a non-joint entry this is a no-op:
+        # seed is all-NaN and rows is every row, exactly as before.
+        seed, rows = splice_from_sources(self.workspace.current, self.workspace, cache)
+        if not rows:
+            # Every row came from an already-measured source; nothing to read.
+            self._on_stats_finished(seed)
+            return
+
         # Resolving a path is a filesystem stat per row; done here on the GUI
         # thread it would freeze for as long as the walk takes, so it happens
         # inside the same pass as the reads.
         self.stats_panel.set_running(True)
-        self.status.emit(f"measuring {n_rows:,} images…")
+        if len(rows) < n_rows:
+            self.status.emit(
+                f"measuring {len(rows):,} of {n_rows:,} images "
+                f"({n_rows - len(rows):,} already known from their own dataset)…"
+            )
+        else:
+            self.status.emit(f"measuring {n_rows:,} images…")
 
-        rows = list(range(n_rows))
         paths = [self._path_for(row) for row in rows]
 
         signals = stats_worker.StatsSignals()
@@ -3463,7 +3644,7 @@ class EmbeddingExplorer(QWidget):
         signals.failed.connect(self._on_stats_failed)
         self._stats_signals = signals  # keep alive for the run
         self._stats_run = stats_worker.start(
-            QThreadPool.globalInstance(), rows, paths, n_rows, signals
+            QThreadPool.globalInstance(), rows, paths, n_rows, signals, seed=seed
         )
 
     def _cancel_image_stats(self) -> None:

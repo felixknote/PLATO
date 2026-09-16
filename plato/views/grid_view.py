@@ -322,6 +322,15 @@ class GridView(QWidget):
         # rather than per facet -- this is what makes the panels comparable.
         limits = self._shared_limits(coords) if self.shared_axes else None
 
+        # Same idea for the outline: one decision for the whole grid, from
+        # the LARGEST facet, so a panel that happens to sit just under
+        # OUTLINE_LIMIT never looks different from a denser neighbour in the
+        # same grid purely because of its own point count. Bigger wins (grid
+        # stays legible over grid stays detailed) because the alternative --
+        # every panel outlined, including one at 30k points -- is exactly the
+        # "grey smear" OUTLINE_LIMIT exists to avoid.
+        outline_count = max((len(indices) for _, indices in groups), default=0)
+
         columns = self.column_count(len(groups))
         for position, (label, indices) in enumerate(groups):
             facet = Facet(label, len(indices))
@@ -335,6 +344,7 @@ class GridView(QWidget):
                 symbols=[symbols[i] for i in indices] if symbols else None,
                 legend_entries=None,
                 reset_view=limits is None,
+                outline_count=outline_count,
             )
             if selected is not None:
                 facet.scatter.set_selection(selected, notify=False)

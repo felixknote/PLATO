@@ -325,6 +325,26 @@ QSlider::handle:horizontal:hover {{ background: #ffffff; }}
 QSlider::handle:horizontal:disabled {{ background: {TEXT_FAINT}; }}
 QSlider::sub-page:horizontal:disabled {{ background: {BORDER_STRONG}; }}
 
+/* -- progress bars ------------------------------------------------------ */
+
+/* Projection progress, image-statistics progress and the modal indexing
+   dialog (ProgressDialog) all use a bare QProgressBar. Unstyled, Fusion
+   paints the chunk from the QPalette Highlight -- the same square-cornered,
+   system blue the sliders used to fall back to before they got their own
+   rule above -- so this is the same fix applied to the same failure mode. */
+
+QProgressBar {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 3px;
+    text-align: center;
+    color: {TEXT_MUTED};
+}}
+QProgressBar::chunk {{
+    background-color: {ACCENT};
+    border-radius: 2px;
+}}
+
 /* -- splitters and scrollbars ----------------------------------------- */
 
 QSplitter::handle {{ background-color: {BORDER}; }}

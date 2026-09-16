@@ -151,6 +151,65 @@ def test_independent_axes_differ(grid):
     assert ranges[0][0] != pytest.approx(ranges[1][0])
 
 
+def _has_outline(facet) -> bool:
+    """Whether a facet's drawn points carry a visible outline pen.
+
+    pyqtgraph never stores a bare None: passing pen=None still yields a QPen
+    object, just styled Qt.PenStyle.NoPen (invisible) rather than SolidLine --
+    so the style, not is-None, is what actually distinguishes "outlined" from
+    "outline suppressed".
+    """
+    from PySide6.QtCore import Qt as _Qt
+
+    for item in facet.scatter._items:
+        pen = item.opts.get("pen")
+        return pen is not None and pen.style() != _Qt.PenStyle.NoPen
+    return False
+
+
+def test_outline_is_decided_once_for_the_whole_grid(grid):
+    """A panel under OUTLINE_LIMIT must not look different from a denser
+    neighbour in the same grid just because it has fewer points of its own --
+    the decision is the largest facet's count, applied to every panel.
+
+    Regression: each facet used to decide independently from its own
+    len(coords), so a 6-facet grid straddling the 4,000-point limit drew
+    three panels with outlines and three without, in the same figure.
+    """
+    from plato.views.scatter import OUTLINE_LIMIT
+
+    small_n = OUTLINE_LIMIT - 500
+    large_n = OUTLINE_LIMIT + 500
+    coords, rows, colours = _points(n=small_n + large_n)
+    values = np.asarray(["small"] * small_n + ["large"] * large_n, dtype=object)
+    groups, _ = build_groups(values)
+    grid.set_groups(groups)
+    grid.render(coords, rows, colours)
+
+    outlines = [_has_outline(f) for f in grid.facets]
+    assert len(outlines) == 2
+    # Both facets must agree -- the large one drove the decision, so BOTH
+    # come back without an outline, never "large has none, small still does".
+    assert outlines[0] == outlines[1] == False  # noqa: E712
+
+
+def test_outline_shows_when_every_facet_is_small(grid):
+    """The positive case: nothing over the limit anywhere, outlines stay on
+    everywhere -- this must not regress into "off by default" once the
+    decision moved to a shared count."""
+    from plato.views.scatter import OUTLINE_LIMIT
+
+    n_each = min(200, OUTLINE_LIMIT - 1)
+    coords, rows, colours = _points(n=n_each * 2)
+    values = np.asarray(["A"] * n_each + ["B"] * n_each, dtype=object)
+    groups, _ = build_groups(values)
+    grid.set_groups(groups)
+    grid.render(coords, rows, colours)
+
+    outlines = [_has_outline(f) for f in grid.facets]
+    assert all(outlines)
+
+
 def test_many_groups_page_rather_than_shrink(grid):
     coords, rows, colours = _points(400)
     values = np.asarray([f"g{i % 40}" for i in range(400)], dtype=object)
