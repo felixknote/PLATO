@@ -561,3 +561,57 @@ def test_turning_lasso_off_freezes_the_last_analysis(explorer):
     explorer.scatter.set_lasso(False)
     explorer.scatter.set_selection(np.array([26]))
     assert explorer.cluster_panel.summary_label.text() == snapshot
+
+
+# -- the Data section's plate count ------------------------------------------
+
+
+def test_data_summary_states_how_many_plates_are_loaded(explorer):
+    """How many distinct plates a dataset covers is exactly what a reader
+    wants to know before opening Grouping to facet by plate, and it has to
+    stay visible with the section collapsed -- see _update_section_summaries."""
+    from pathlib import Path
+
+    from plato.data.embeddings import EmbeddingDataset
+    from plato.data.workspace import EmbeddingEntry
+
+    frame = explorer.frame.copy()
+    frame["plate"] = (["P1"] * 25) + (["P2"] * 25)
+    explorer.frame = frame
+    dataset = EmbeddingDataset(
+        name="my_export",
+        directory=Path("/data/my_export"),
+        vectors=np.zeros((50, 4), dtype=np.float32),
+        frame=frame,
+        run_info={},
+    )
+    explorer.workspace.add(EmbeddingEntry(name="my_export", dataset=dataset, frame=frame))
+
+    explorer._update_section_summaries()
+
+    summary = explorer.accordion.section("data").header.summary_text()
+    assert "my_export" in summary
+    assert "2 plates" in summary
+
+
+def test_data_summary_omits_plate_count_when_there_is_no_plate_column(explorer):
+    """A dataset with no plate column (image_name/condition-only exports
+    exist) must not crash or claim a plate count that is not there."""
+    from pathlib import Path
+
+    from plato.data.embeddings import EmbeddingDataset
+    from plato.data.workspace import EmbeddingEntry
+
+    dataset = EmbeddingDataset(
+        name="my_export",
+        directory=Path("/data/my_export"),
+        vectors=np.zeros((50, 4), dtype=np.float32),
+        frame=explorer.frame,
+        run_info={},
+    )
+    explorer.workspace.add(EmbeddingEntry(name="my_export", dataset=dataset, frame=explorer.frame))
+
+    explorer._update_section_summaries()
+
+    summary = explorer.accordion.section("data").header.summary_text()
+    assert summary == "my_export"

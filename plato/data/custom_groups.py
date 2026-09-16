@@ -207,6 +207,14 @@ def suggest_classes(values, per_class: int = 2, prefix: str = "Group") -> dict[s
     an empty grid. It is a *suggestion*: the ordering it assumes (that the
     column sorts the way the runs happened) is true often enough to save
     typing and obvious enough to correct when it is not.
+
+    Relies on plate (or whatever column is being grouped) values already
+    being UNAMBIGUOUS by the time they reach here -- see
+    joint_projection._disambiguate_shared_plate_names, which prefixes a
+    joint entry's plate column with its source dataset wherever two screens
+    wrote the same bare plate name ("P1") for genuinely unrelated plates.
+    Without that, natural-sorting the raw values would interleave unrelated
+    screens and this function would pair plates across them.
     """
     ordered = sorted({str(v).strip() for v in values if str(v).strip()}, key=_natural)
     out: dict[str, str] = {}

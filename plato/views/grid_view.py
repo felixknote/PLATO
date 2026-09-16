@@ -39,17 +39,24 @@ from PySide6.QtWidgets import (
 )
 
 from ..gui import themes
+from ..ordering import series_key
 from .scatter import EmbeddingScatter
 
 # Legend entries beyond this many wrap the strip past what a header row
 # should cost; past it the swatches are still correct, just not all shown.
 MAX_STRIP_ENTRIES = 16
 
-# Facets per page, laid out at most MAX_GRID_COLUMNS wide. A 4x4 grid of
-# 300px panels fills a large screen; beyond that they stop being readable
-# and paging is the honest answer.
+# Columns a grid lays out at most, whatever the group count -- a 4-wide grid
+# of panels reads better than a long strip. Rows are unbounded: every group
+# renders, and the grid's own QScrollArea is how you reach the rest, rather
+# than a page count that hides some of the data until you page to it.
 MAX_GRID_COLUMNS = 4
-DEFAULT_PAGE_SIZE = MAX_GRID_COLUMNS * MAX_GRID_COLUMNS
+
+# page_size's default: large enough that paging never actually triggers for
+# any real grouping -- explorer.py's own MAX_FACET_GROUPS (60) already caps
+# how many groups a facet column can offer in the first place, so this only
+# needs to be at least that.
+NO_PAGE_LIMIT = 1_000
 
 # Smallest a facet may be before it stops showing structure.
 MIN_PANEL_PX = 180
@@ -60,8 +67,26 @@ BY_NAME = "name"
 SORT_LABELS = {BY_SIZE: "Largest first", BY_NAME: "By name"}
 
 
+class _ClickableLabel(QLabel):
+    """A QLabel that emits on mouse press -- QLabel has no click signal of
+    its own, and a full QPushButton would need its own restyling to read as
+    a title rather than a button."""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt override
+        self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class Facet(QWidget):
     """One group's plot, with its name and count above it."""
+
+    # Emitted when the title bar is clicked -- expand this facet to fill the
+    # grid, or (if it is already the expanded one) collapse back. A plain
+    # click rather than a button: the title is already the one part of a
+    # facet that is never a data point, so it costs nothing else to overload.
+    title_clicked = Signal()
 
     def __init__(self, title: str, count: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -69,11 +94,14 @@ class Facet(QWidget):
         self.scatter = EmbeddingScatter()
         self.scatter.setMinimumSize(MIN_PANEL_PX, MIN_PANEL_PX)
 
-        self.title = QLabel()
+        self.title = _ClickableLabel()
         self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Long category names must not widen the column; elide instead.
         self.title.setTextFormat(Qt.TextFormat.PlainText)
         self.title.setWordWrap(False)
+        self.title.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.title.setToolTip("Click to expand this plot")
+        self.title.clicked.connect(self.title_clicked)
         self._count = count
 
         layout = QVBoxLayout()
@@ -185,13 +213,26 @@ class GridView(QWidget):
     point_activated = Signal(int)
     points_selected = Signal(object)
     page_changed = Signal(int, int)  # page, total pages
+    # The expanded facet's label, or None once collapsed back to the full
+    # grid -- explorer.py listens to keep its own "back to grid" affordance
+    # (and anything else that cares) in sync with a click on a facet title.
+    expanded_changed = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.facets: list[Facet] = []
         self._groups: list[tuple[str, np.ndarray]] = []
         self._page = 0
-        self.page_size = DEFAULT_PAGE_SIZE
+        # The label of the one facet showing full-size, or None for the
+        # ordinary grid. Kept as state here (not a caller-side filter)
+        # because collapsing back has to restore every OTHER facet exactly
+        # as it was, which only a re-render from the full _groups list does.
+        self._expanded_label: str | None = None
+        # No real cap: every group renders in one page, and the grid's own
+        # QScrollArea is how the rest is reached. Kept as an attribute (with
+        # paging still wired through n_pages/set_page) rather than removing
+        # the mechanism outright, since a caller can still set it lower.
+        self.page_size = NO_PAGE_LIMIT
         self.columns = 0  # 0 = automatic
         self.shared_axes = True
 
@@ -240,6 +281,7 @@ class GridView(QWidget):
         self._clear()
         self._groups = []
         self._page = 0
+        self._expanded_label = None
         self.legend.set_entries(None)
 
     def set_groups(
@@ -248,13 +290,29 @@ class GridView(QWidget):
         *,
         sort: str = BY_SIZE,
     ) -> None:
-        """``groups`` is (label, positional indices) per facet."""
+        """``groups`` is (label, positional indices) per facet.
+
+        Called on every redraw while faceting is active, not only when the
+        user picks a new grouping field -- so an expanded facet's label is
+        preserved across calls (a filter or colour change must not silently
+        collapse it) and only cleared if that label genuinely no longer
+        exists in the new groups, which is what switching to a different
+        facet column looks like.
+        """
         if sort == BY_SIZE:
             groups = sorted(groups, key=lambda g: (-len(g[1]), g[0]))
         else:
-            groups = sorted(groups, key=lambda g: g[0])
+            # series_key, not a plain string sort: "By name" on a custom
+            # grouping like "Day 1".."Day 16" (or a plain plate facet, "P1"..
+            # "P20") must read Day 2 before Day 10, not after it -- see
+            # plato.ordering for the same rule the dose/timepoint filters use.
+            groups = sorted(groups, key=lambda g: series_key(g[0]))
         self._groups = groups
         self._page = 0
+        if self._expanded_label is not None and not any(
+            label == self._expanded_label for label, _ in groups
+        ):
+            self._expanded_label = None
 
     @property
     def n_groups(self) -> int:
@@ -274,8 +332,26 @@ class GridView(QWidget):
         self._page = max(0, min(page, max(0, self.n_pages - 1)))
 
     def current_groups(self) -> list[tuple[str, np.ndarray]]:
+        if self._expanded_label is not None:
+            return [g for g in self._groups if g[0] == self._expanded_label]
         start = self._page * self.page_size
         return self._groups[start : start + self.page_size]
+
+    @property
+    def expanded_label(self) -> str | None:
+        return self._expanded_label
+
+    def expand(self, label: str) -> None:
+        """Show only ``label``'s facet, filling the grid area."""
+        self._expanded_label = label
+        self.expanded_changed.emit(label)
+
+    def collapse(self) -> None:
+        """Back to the ordinary grid, exactly as it was before expanding."""
+        if self._expanded_label is None:
+            return
+        self._expanded_label = None
+        self.expanded_changed.emit(None)
 
     def column_count(self, n: int) -> int:
         """Columns for ``n`` facets: as square as possible, capped at 4 wide."""
@@ -354,6 +430,17 @@ class GridView(QWidget):
             facet.scatter.point_clicked.connect(self.point_clicked.emit)
             facet.scatter.point_activated.connect(self.point_activated.emit)
             facet.scatter.points_selected.connect(self.points_selected.emit)
+            # Clicking the expanded facet's own title collapses it back;
+            # clicking any facet's title while the grid is showing all of
+            # them expands that one. Bound with a default argument (not a
+            # bare lambda over the loop variable) so each facet's connection
+            # keeps ITS OWN label rather than every one closing over the
+            # last value `label` had after the loop finishes.
+            facet.title_clicked.connect(
+                lambda lbl=label: self.collapse()
+                if self._expanded_label == lbl
+                else self.expand(lbl)
+            )
 
             self.grid.addWidget(facet, position // columns, position % columns)
             self.facets.append(facet)

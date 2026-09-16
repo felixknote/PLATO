@@ -44,6 +44,77 @@ def _entry(name: str, n: int, dims: int, center: float = 0.0) -> EmbeddingEntry:
     return EmbeddingEntry(name=name, dataset=dataset, frame=frame)
 
 
+def test_joint_directory_is_stable_across_separate_loads():
+    """The joint entry's synthetic directory must be the SAME across two
+    independent sessions combining the same source datasets, even though
+    each EmbeddingEntry gets a fresh random .key every time it is loaded --
+    this is what ResolverStore's persistence keys on. A key built from
+    entry.key instead of entry.dataset.directory would give a different
+    synthetic directory every session, silently breaking "locate the joint
+    entry's images once" for every joint entry that ever existed.
+    """
+    session_one = [_entry("A", 10, 8), _entry("B", 10, 8)]
+    session_two = [_entry("A", 10, 8), _entry("B", 10, 8)]
+    # Different EmbeddingEntry objects, and therefore different .key values
+    # (assigned by uuid4 in the dataclass default), but the same dataset
+    # directories -- exactly what re-opening the same two exports looks like.
+    assert session_one[0].key != session_two[0].key
+
+    joint_one = make_joint_entry(session_one)
+    joint_two = make_joint_entry(session_two)
+
+    assert str(joint_one.dataset.directory) == str(joint_two.dataset.directory)
+
+
+def test_joint_directory_differs_for_a_different_combination():
+    """A genuinely different set of sources must get a different key, or
+    two unrelated joint entries would collide on the same remembered roots."""
+    joint_ab = make_joint_entry([_entry("A", 10, 8), _entry("B", 10, 8)])
+    joint_ac = make_joint_entry([_entry("A", 10, 8), _entry("C", 10, 8)])
+
+    assert str(joint_ab.dataset.directory) != str(joint_ac.dataset.directory)
+
+
+def _entry_with_plates(name: str, plates: list[str], dims: int = 8) -> EmbeddingEntry:
+    rng = np.random.default_rng(abs(hash(name)) % 2**31)
+    frame = pd.DataFrame({"plate": plates})
+    dataset = EmbeddingDataset(
+        name=name,
+        directory=Path(f"/data/{name}"),
+        vectors=rng.normal(size=(len(plates), dims)).astype(np.float32),
+        frame=frame,
+        run_info={},
+    )
+    return EmbeddingEntry(name=name, dataset=dataset, frame=frame)
+
+
+def test_shared_plate_names_across_sources_are_disambiguated():
+    """Real case: 2025_12_CRISPRi and 2026_04_ABx both write bare "P1" for
+    two UNRELATED physical plates. Faceting/grouping by plate on the joint
+    entry must be able to tell them apart."""
+    a = _entry_with_plates("2025_12_CRISPRi", ["P1", "P1", "P2"])
+    b = _entry_with_plates("2026_04_ABx", ["P1", "P1", "P3"])
+    joint = build_joint_dataset([a, b])
+
+    plates = joint.frame["plate"].tolist()
+    assert plates[0] == plates[1] == "2025_12_CRISPRi · P1"
+    assert plates[3] == plates[4] == "2026_04_ABx · P1"
+    # Not shared with anything, so left alone rather than renamed for
+    # consistency's own sake -- nothing to disambiguate it FROM.
+    assert plates[2] == "P2"
+    assert plates[5] == "P3"
+
+
+def test_unambiguous_plate_names_are_left_alone():
+    """The common case -- every source's plate column is already unique
+    across the whole joint entry -- must not be rewritten at all."""
+    a = _entry_with_plates("armA", ["P1", "P2"])
+    b = _entry_with_plates("armB", ["P3", "P4"])
+    joint = build_joint_dataset([a, b])
+
+    assert joint.frame["plate"].tolist() == ["P1", "P2", "P3", "P4"]
+
+
 def test_needs_at_least_two_entries():
     with pytest.raises(IncompatibleEmbeddings):
         check_compatible([_entry("A", 10, 8)])

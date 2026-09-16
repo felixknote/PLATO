@@ -210,6 +210,105 @@ def test_outline_shows_when_every_facet_is_small(grid):
     assert all(outlines)
 
 
+def test_by_name_sort_orders_numerically_not_alphabetically(grid):
+    """"By name" on a custom "Day N" grouping (or a plain plate facet) must
+    read Day 2 before Day 10 -- a plain string sort puts "Day 10" right
+    after "Day 1", ahead of "Day 2".."Day 9"."""
+    from plato.views.grid_view import BY_NAME
+
+    coords, rows, colours = _points(n=12 * 4)
+    labels = ["Day 1", "Day 2", "Day 10", "Day 11"]
+    values = np.asarray(
+        [label for label in labels for _ in range(12)], dtype=object
+    )
+    groups, _ = build_groups(values)
+    grid.set_groups(groups, sort=BY_NAME)
+    grid.render(coords, rows, colours)
+
+    titles = [f.title_text for f in grid.facets]
+    assert titles == ["Day 1", "Day 2", "Day 10", "Day 11"]
+
+
+def test_clicking_a_facet_title_expands_it(grid):
+    coords, rows, colours = _points()
+    values = np.asarray(["A"] * 80 + ["B"] * 120, dtype=object)
+    groups, _ = build_groups(values)
+    grid.set_groups(groups)
+    grid.render(coords, rows, colours)
+    assert len(grid.facets) == 2
+
+    target = next(f for f in grid.facets if f.title_text == "A")
+    target.title.clicked.emit()
+
+    assert grid.expanded_label == "A"
+    grid.render(coords, rows, colours)
+    assert len(grid.facets) == 1
+    assert grid.facets[0].title_text == "A"
+
+
+def test_clicking_the_expanded_facets_title_again_collapses_it(grid):
+    coords, rows, colours = _points()
+    values = np.asarray(["A"] * 80 + ["B"] * 120, dtype=object)
+    groups, _ = build_groups(values)
+    grid.set_groups(groups)
+    grid.expand("A")
+    grid.render(coords, rows, colours)
+
+    grid.facets[0].title.clicked.emit()
+
+    assert grid.expanded_label is None
+    grid.render(coords, rows, colours)
+    assert len(grid.facets) == 2
+
+
+def test_expanded_label_survives_a_redraw_with_the_same_groups(grid):
+    """set_groups runs on every redraw while faceting is on, not just when
+    the grouping field changes -- a filter/colour change must not silently
+    collapse an expanded facet."""
+    coords, rows, colours = _points()
+    values = np.asarray(["A"] * 80 + ["B"] * 120, dtype=object)
+    groups, _ = build_groups(values)
+    grid.set_groups(groups)
+    grid.expand("A")
+
+    # Re-supplying the SAME groups, as a redraw for an unrelated reason would.
+    grid.set_groups(groups)
+
+    assert grid.expanded_label == "A"
+
+
+def test_expanded_label_clears_when_it_no_longer_exists(grid):
+    """Switching to a different grouping FIELD changes the whole label set;
+    an expanded label from the old field must not linger and silently show
+    an empty grid."""
+    coords, rows, colours = _points()
+    values = np.asarray(["A"] * 80 + ["B"] * 120, dtype=object)
+    groups, _ = build_groups(values)
+    grid.set_groups(groups)
+    grid.expand("A")
+
+    other_values = np.asarray(["X"] * 100 + ["Y"] * 100, dtype=object)
+    other_groups, _ = build_groups(other_values)
+    grid.set_groups(other_groups)
+
+    assert grid.expanded_label is None
+
+
+def test_no_default_page_limit(grid):
+    """The default must show every group at once -- paging is opt-in
+    (test_many_groups_page_rather_than_shrink sets page_size explicitly),
+    not something a caller has to fight to turn off."""
+    coords, rows, colours = _points(400)
+    values = np.asarray([f"g{i % 40}" for i in range(400)], dtype=object)
+    groups, _ = build_groups(values)
+    grid.set_groups(groups)
+
+    assert grid.n_groups == 40
+    assert grid.n_pages == 1
+    grid.render(coords, rows, colours)
+    assert len(grid.facets) == 40
+
+
 def test_many_groups_page_rather_than_shrink(grid):
     coords, rows, colours = _points(400)
     values = np.asarray([f"g{i % 40}" for i in range(400)], dtype=object)

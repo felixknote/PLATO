@@ -1240,6 +1240,7 @@ class EmbeddingExplorer(QWidget):
         self.grid.point_clicked.connect(self._on_point_clicked)
         self.grid.point_activated.connect(self._on_click)
         self.grid.points_selected.connect(self._on_selection)
+        self.grid.expanded_changed.connect(self._on_grid_expanded_changed)
         self.grid.hide()
 
         self.message = QLabel("")
@@ -1280,9 +1281,21 @@ class EmbeddingExplorer(QWidget):
         export_svg = QPushButton("Export SVG…")
         export_svg.clicked.connect(lambda: self.export("svg"))
 
+        # In the main toolbar, not the (collapsible) Grouping section: this
+        # has to stay reachable however the sidebar is arranged, since it is
+        # the whole point of being able to expand a facet in the first place
+        # -- a way back that does not depend on remembering which accordion
+        # section it lives in. Only visible while a facet actually is
+        # expanded; self.grid does not exist yet here, so the connection is
+        # deferred to a lambda rather than a direct method reference.
+        self.grid_back_button = QPushButton("← Back to grid")
+        self.grid_back_button.clicked.connect(lambda: self.grid.collapse())
+        self.grid_back_button.hide()
+
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(10, 6, 10, 6)
         toolbar.addWidget(self.count_label, 1)
+        toolbar.addWidget(self.grid_back_button)
         toolbar.addWidget(self.image_mode_box)
         toolbar.addWidget(reset_view)
         toolbar.addWidget(export_png)
@@ -2374,6 +2387,13 @@ class EmbeddingExplorer(QWidget):
         extra = len(self.workspace.entries) - 1
         if name and extra > 0:
             name = f"{name} (+{extra})"
+        if name and self.frame is not None and PLATE in self.frame.columns:
+            # How many distinct plates this dataset actually covers -- the
+            # thing a reader most wants to know before opening Grouping to
+            # facet by plate, and it stays visible with the section shut.
+            n_plates = len(distinct_values(self.frame, PLATE))
+            if n_plates:
+                name = f"{name} · {n_plates} plate{'s' if n_plates != 1 else ''}"
         accordion.set_summary("data", name)
 
         # Embedding: method and how many points it was fitted on.
@@ -3500,7 +3520,18 @@ class EmbeddingExplorer(QWidget):
         self.grid.set_page(self.grid.page + delta)
         self._redraw()
 
+    def _on_grid_expanded_changed(self, label: str | None) -> None:
+        """A facet title was clicked -- redraw to show just it, or the whole
+        grid again, and swap which page controls make sense right now."""
+        self._redraw()
+        self.grid_back_button.setVisible(label is not None)
+        self.grid_prev.setVisible(label is None)
+        self.grid_next.setVisible(label is None)
+
     def _update_page_label(self) -> None:
+        if self.grid.expanded_label is not None:
+            self.grid_page_label.setText(self.grid.expanded_label)
+            return
         pages = self.grid.n_pages
         if pages <= 1:
             self.grid_page_label.setText(

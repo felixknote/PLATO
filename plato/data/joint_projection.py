@@ -211,6 +211,45 @@ def check_compatible(entries: list[EmbeddingEntry]) -> None:
         )
 
 
+def _disambiguate_shared_plate_names(frame: pd.DataFrame) -> None:
+    """Prefix ``plate`` with its dataset wherever the SAME plate name is
+    written by more than one source, in place.
+
+    Real screens on this machine are not consistently namespaced: four of
+    six real DINO exports write a bare "P1".."P6"-ish plate column, and two
+    write "ABx_P1"/"CRISPRi_P1" -- so "P1" alone names FOUR unrelated
+    physical plates from four different runs once they are concatenated.
+    Faceting or grouping by plate on a joint entry with no fix would (and
+    did) silently pool points from unrelated plates into one facet, and any
+    custom grouping built over it inherited the same collision.
+
+    Deliberately conditional: a joint entry whose sources never share a
+    plate name (the common case, when every export already namespaces its
+    own plate column, or the plates genuinely do not collide) is left with
+    its plain "P1"/"P2" values -- there is nothing here to disambiguate, and
+    rewriting it anyway would make every existing joint entry's plate labels
+    longer for no reason.
+    """
+    from .explorer_model import PLATE
+
+    if PLATE not in frame.columns or DATASET_COLUMN not in frame.columns:
+        return
+    plates = frame[PLATE].astype(str)
+    non_empty = plates.ne("")
+    # A plate name is ambiguous if it is written by more than one dataset --
+    # checked on the (dataset, plate) pair count vs the plate's own count,
+    # not on raw row count, since one dataset legitimately has many rows per
+    # plate.
+    pairs = frame.loc[non_empty, [DATASET_COLUMN, PLATE]].drop_duplicates()
+    ambiguous = set(pairs[PLATE][pairs.duplicated(subset=PLATE, keep=False)])
+    if not ambiguous:
+        return
+    mask = non_empty & plates.isin(ambiguous)
+    frame.loc[mask, PLATE] = (
+        frame.loc[mask, DATASET_COLUMN].astype(str) + " · " + plates[mask]
+    )
+
+
 def build_joint_dataset(
     entries: list[EmbeddingEntry], *, align: str = ALIGN_NONE
 ) -> JointDataset:
@@ -240,6 +279,7 @@ def build_joint_dataset(
 
     vectors = np.concatenate(vector_parts, axis=0)
     frame = pd.concat(frame_parts, ignore_index=True)
+    _disambiguate_shared_plate_names(frame)
     # After concatenation, before the fit: alignment needs the arms in one
     # array to know where each starts, and the fit must never see the
     # unaligned version.
@@ -269,9 +309,14 @@ def make_joint_entry(
     ``EmbeddingEntry`` and know nothing about where its vectors came from.
 
     ``directory`` is a synthetic, non-existent path built from the source
-    entries' own directories: it has to be something, since EmbeddingDataset
-    requires one, but a joint entry is never re-loaded from disk so nothing
-    reads it as real.
+    entries' own SOURCE DATASET directories (never from ``entry.key``, which
+    is a random id assigned fresh every time an entry is loaded -- keying on
+    it would make the same combination of the same datasets get a different
+    synthetic directory every session). A joint entry is never re-loaded from
+    disk, so nothing reads this as a real path, but ResolverStore does use it
+    as a persistence key: combining the same datasets a second time, even in
+    a later session, must resolve to the same remembered answer, or "locate
+    the images once" silently never applies to any joint entry at all.
     """
     joint = build_joint_dataset(entries, align=align)
     label = name or " + ".join(e.name for e in entries)
@@ -281,7 +326,7 @@ def make_joint_entry(
         # aligned fit that presents as a plain one is a figure that misstates
         # what was done to the data.
         label = f"{label} [{'centred' if align == ALIGN_CENTRE else 'centred+scaled'}]"
-    directory = Path("<joint>") / "+".join(sorted(e.key for e in entries))
+    directory = Path("<joint>") / "+".join(sorted(str(e.dataset.directory) for e in entries))
 
     dataset = EmbeddingDataset(
         name=label,
