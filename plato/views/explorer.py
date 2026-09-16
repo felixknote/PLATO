@@ -148,7 +148,7 @@ SECTION_CHROME_WIDTH = 100
 # taller than the plot and stops being readable at all.
 #
 # It is deliberately NOT the thing that usually decides: the real limit is the
-# palette, which has 8-20 colours depending on which is active. Beyond that
+# palette, which has 8-30 colours depending on which is active. Beyond that
 # colours repeat, so two different values share one swatch and a legend would
 # claim a distinction the plot cannot make. See _legend_limit.
 MAX_LEGEND_ENTRIES = 40
@@ -527,6 +527,54 @@ class _RememberedResolveTask(QRunnable):
             pass
 
 
+class _LoadSignals(QObject):
+    # directory, dataset, frame -- the two pure (no-Qt) products of loading
+    # one export, built off the GUI thread. Everything that touches a widget
+    # still happens back on the GUI thread, from _on_dataset_loaded.
+    loaded = Signal(object, object, object)
+    # directory, EmbeddingError | OSError | ValueError message
+    failed = Signal(object, str)
+
+
+class _LoadTask(QRunnable):
+    """Reads one embedding export's vectors and metadata off the GUI thread.
+
+    load_dataset (numpy .npz + pandas CSV) and build_frame (pure pandas) are
+    the whole cost of opening a dataset and touch no Qt state, so both run
+    here. Measured on six real DINO exports: 19.4 s combined, almost all of
+    it numpy unzipping the .npz -- run sequentially on the GUI thread (the
+    original code path) that is 19.4 s of a frozen, unresponsive window with
+    no progress shown. QThreadPool runs several of these at once, so six
+    exports overlap instead of queuing, AND the window stays interactive
+    throughout.
+    """
+
+    def __init__(self, directory: Path, moa_table, pathway_table, signals: _LoadSignals) -> None:
+        super().__init__()
+        self._directory = directory
+        self._moa_table = moa_table
+        self._pathway_table = pathway_table
+        self._signals = signals
+
+    def run(self) -> None:  # pragma: no cover - worker thread
+        try:
+            dataset = load_dataset(self._directory)
+            frame, _ = build_frame(
+                dataset, moa_table=self._moa_table, pathway_table=self._pathway_table
+            )
+        except (EmbeddingError, OSError, ValueError) as exc:
+            try:
+                self._signals.failed.emit(self._directory, str(exc))
+            except RuntimeError:
+                pass
+            return
+        try:
+            self._signals.loaded.emit(self._directory, dataset, frame)
+        except RuntimeError:
+            # The panel can be closed while a load is still in flight.
+            pass
+
+
 class FilterList(QGroupBox):
     """Multi-select list for one column. Nothing selected = no constraint.
 
@@ -682,6 +730,15 @@ class EmbeddingExplorer(QWidget):
         # true. Cleared whenever a hunt starts or finishes so a stale message
         # from a previous dataset never lingers on a new one.
         self._resolving_status = ""
+
+        # State for the current _browse_for_dataset batch -- see there.
+        # Reset at the start of every batch; not meaningful between batches.
+        self._load_signals: _LoadSignals | None = None
+        self._load_batch_plates: list[Path] = []
+        self._load_batch_loaded: list[EmbeddingDataset] = []
+        self._load_batch_failed: list[str] = []
+        self._load_batch_pending = 0
+        self._load_batch_last_directory: Path | None = None
 
         search_roots = [Path(__file__).resolve().parents[2]]
         # Layered, not first-match: a PLATO-local drug_moa.csv correction or
@@ -1275,7 +1332,11 @@ class EmbeddingExplorer(QWidget):
         self.image_mode_box.toggled.connect(self.set_image_mode)
 
         reset_view = QPushButton("Reset view")
-        reset_view.clicked.connect(self.scatter.reset_view)
+        # Whichever view is actually on screen -- self.scatter alone did
+        # nothing while faceting, since it was the hidden one.
+        reset_view.clicked.connect(
+            lambda: self.grid.reset_view() if self.grid.isVisible() else self.scatter.reset_view()
+        )
         export_png = QPushButton("Export PNG…")
         export_png.clicked.connect(lambda: self.export("png"))
         export_svg = QPushButton("Export SVG…")
@@ -1457,6 +1518,17 @@ class EmbeddingExplorer(QWidget):
         rarely organised as one folder holding exactly the datasets wanted,
         and a user should not have to know the exact level in advance. See
         plato.views.load_data_dialog and plato.data.discovery.
+
+        Each embedding is read on a background _LoadTask rather than in this
+        loop: load_dataset + build_frame together cost seconds per export
+        (measured: 19.4 s combined for six real DINO exports, almost all
+        numpy unzipping the .npz), and running that on the GUI thread once
+        per file froze the window for the whole batch with no progress shown.
+        QThreadPool runs several at once, so the six overlap instead of
+        queuing AND the window stays interactive. Results arrive at
+        _on_load_task_finished/_on_load_task_failed as each completes, in
+        whatever order the disk hands them back; _finish_dataset_load runs
+        once every task this batch started has reported in.
         """
         from ..data.locations import EMBEDDING_ROOT
         from .load_data_dialog import LoadDataDialog
@@ -1470,23 +1542,55 @@ class EmbeddingExplorer(QWidget):
         if not embeddings and not plates:
             return
 
-        loaded, failed = 0, []
-        for directory in embeddings:
-            if self._load_embedding_directory(directory, announce=False):
-                loaded += 1
-            else:
-                failed.append(directory.name)
+        if not embeddings:
+            self._finish_dataset_load([], [], plates)
+            return
 
+        self._load_batch_plates = plates
+        self._load_batch_loaded: list[EmbeddingDataset] = []
+        self._load_batch_failed: list[str] = []
+        self._load_batch_pending = len(embeddings)
+        self._load_batch_last_directory = embeddings[-1]
+        self.status.emit(f"loading {len(embeddings)} embedding(s)…")
+
+        signals = _LoadSignals()
+        signals.loaded.connect(self._on_load_task_finished)
+        signals.failed.connect(self._on_load_task_failed)
+        self._load_signals = signals  # keep alive for the batch's lifetime
+        pool = QThreadPool.globalInstance()
+        for directory in embeddings:
+            pool.start(_LoadTask(directory, self.moa_table, self.pathway_table, signals))
+
+    def _on_load_task_finished(self, directory: Path, dataset, frame) -> None:
+        self._load_batch_loaded.append(dataset)
+        # Register and apply immediately -- each entry becomes usable the
+        # moment its own load finishes, rather than all appearing at once
+        # only after the slowest file in the batch is done.
+        self._apply_loaded_dataset(dataset, frame, announce=False)
+        self._on_load_task_settled(directory)
+
+    def _on_load_task_failed(self, directory: Path, message: str) -> None:
+        self._load_batch_failed.append(directory.name)
+        self._on_load_task_settled(directory)
+
+    def _on_load_task_settled(self, directory: Path) -> None:
+        self._load_batch_pending -= 1
+        if self._load_batch_pending <= 0:
+            self._finish_dataset_load(
+                self._load_batch_loaded, self._load_batch_failed, self._load_batch_plates
+            )
+
+    def _finish_dataset_load(self, loaded: list, failed: list[str], plates: list[Path]) -> None:
         self._sync_open_box()
         if loaded and self.workspace.current is not None:
-            # Land on the last one loaded rather than whatever was current
-            # before -- that is what "just loaded" means to the user.
-            # _load_embedding_directory already left _active_key on the last
-            # entry it loaded, so this is usually a no-op; calling it
-            # explicitly is what stays correct if that ever changes.
-            self._switch_to(self.workspace.current.key)
+            # Land on the last one SUBMITTED, not whichever happened to
+            # finish last -- background tasks can complete in any order, so
+            # "last loaded" has to mean the order the user picked them in.
+            last = self.workspace.find_by_directory(self._load_batch_last_directory)
+            if last:
+                self._switch_to(last[0].key)
 
-        summary = f"loaded {loaded} embedding{'s' if loaded != 1 else ''}"
+        summary = f"loaded {len(loaded)} embedding{'s' if len(loaded) != 1 else ''}"
         if failed:
             summary += f" — {len(failed)} failed: {', '.join(failed[:3])}"
             if len(failed) > 3:
@@ -1648,43 +1752,64 @@ class EmbeddingExplorer(QWidget):
     def _load_embedding_directory(self, directory: Path, *, announce: bool) -> bool:
         """Load one embedding export and register it with the workspace.
 
-        Shared by the single-select dropdown and the multi-folder loader, so
-        both paths register entries, resolve images and rebuild the controls
-        identically. Returns whether the load succeeded; a failure updates
-        the message panel only when ``announce`` is set, since a bulk load
-        reports its own failures rather than overwriting its progress message
-        for every file that does not load.
+        Used by the single-select dropdown, which loads exactly one
+        directory and can afford to block on it. The multi-folder loader
+        (_browse_for_dataset) uses the background _LoadTask path instead --
+        see _apply_loaded_dataset for the GUI-thread half both paths share.
+        Returns whether the load succeeded; a failure updates the message
+        panel only when ``announce`` is set.
         """
         try:
             dataset = load_dataset(directory)
-            self.compute_features_button.setVisible(False)
         except EmbeddingError as exc:
             if announce:
-                self.dataset = None
-                self.frame = None
-                self._clear_filters()
-                # An export whose metadata exists but whose vectors do not is
-                # not a dead end: the images it describes can be described
-                # directly, keeping all of its own annotation.
-                self._missing_vectors_dir = directory
-                self._set_message(
-                    str(exc)
-                    + "\n\nPLATO can describe the images themselves instead — "
-                    "the export's own metadata is kept, so colouring by gene, "
-                    "drug and MoA still works."
-                )
-                self.compute_features_button.setVisible(True)
-                self.status.emit("embeddings unavailable")
+                self._announce_load_failure(directory, exc, missing_vectors=True)
             return False
         except (OSError, ValueError) as exc:
             if announce:
-                self.dataset = None
-                self._set_message(f"Could not read this dataset:\n{exc}")
+                self._announce_load_failure(directory, exc, missing_vectors=False)
             return False
 
         frame, _ = build_frame(
             dataset, moa_table=self.moa_table, pathway_table=self.pathway_table
         )
+        self._apply_loaded_dataset(dataset, frame, announce=announce)
+        return True
+
+    def _announce_load_failure(
+        self, directory: Path, exc: Exception, *, missing_vectors: bool
+    ) -> None:
+        self.dataset = None
+        self.frame = None
+        if missing_vectors:
+            self._clear_filters()
+            # An export whose metadata exists but whose vectors do not is not
+            # a dead end: the images it describes can be described directly,
+            # keeping all of its own annotation.
+            self._missing_vectors_dir = directory
+            self._set_message(
+                str(exc)
+                + "\n\nPLATO can describe the images themselves instead — "
+                "the export's own metadata is kept, so colouring by gene, "
+                "drug and MoA still works."
+            )
+            self.compute_features_button.setVisible(True)
+            self.status.emit("embeddings unavailable")
+        else:
+            self._set_message(f"Could not read this dataset:\n{exc}")
+
+    def _apply_loaded_dataset(
+        self, dataset: EmbeddingDataset, frame, *, announce: bool
+    ) -> None:
+        """The GUI-thread work once a dataset's vectors and frame exist.
+
+        Shared by the synchronous single-file path (_load_embedding_directory)
+        and the background multi-file path (_on_load_task_finished) -- both
+        arrive here with the same two pure objects a _LoadTask produces, and
+        from here on everything is workspace/widget state that must run on
+        the GUI thread regardless of which path built them.
+        """
+        self.compute_features_button.setVisible(False)
         self.dataset = dataset
         self.frame = frame
         self._invalidate_paths()
@@ -1714,7 +1839,6 @@ class EmbeddingExplorer(QWidget):
                 f"{dataset.name}: {dataset.n_points:,} embeddings"
                 + ("" if self.resolver else " · original images not found")
             )
-        return True
 
     def _compute_missing_features(self) -> None:
         """Describe an export's images when its vector file is missing."""
@@ -2480,6 +2604,19 @@ class EmbeddingExplorer(QWidget):
         unknowns = sorted({v for v in raw if is_unknown(v)})
         return known + unknowns
 
+    def _total_points(self, rows) -> int:
+        """The count label's denominator: what is actually on disk for this
+        dataset, not len(rows) -- rows is the PROJECTION's own row set, which
+        a max-points subsample (max_points_box) can already cap well below
+        the dataset. Comparing against len(rows) meant a 25% subsample left
+        "26,208 of 26,208 points" on screen for a 104,832-row joint entry:
+        honestly describing the subsample's own size, but silently implying
+        it was the whole dataset. A filter or subsample narrowing what is
+        drawn must show up as N being smaller than the true total, not as
+        the total shrinking to match N.
+        """
+        return self.dataset.n_points if self.dataset is not None else len(rows)
+
     def _redraw(self, *_args, reset_view: bool = False) -> None:
         # A queued redraw may still be pending when an immediate one runs
         # (e.g. a fresh projection); dropping it avoids drawing twice.
@@ -2499,6 +2636,7 @@ class EmbeddingExplorer(QWidget):
         coords = self.result.coords[mask]
         visible = rows[mask]
         self._visible_rows = visible
+        total_points = self._total_points(rows)
         if len(coords) == 0:
             self.scatter.set_points(
                 np.empty((0, 2), dtype=np.float32),
@@ -2506,7 +2644,7 @@ class EmbeddingExplorer(QWidget):
                 [],
                 legend_entries=None,
             )
-            self.count_label.setText("<b>0</b> of %d points" % len(rows))
+            self.count_label.setText("<b>0</b> of %d points" % total_points)
             return
 
         # Colouring by a measured statistic short-circuits the categorical
@@ -2624,7 +2762,7 @@ class EmbeddingExplorer(QWidget):
             else:
                 extra = f" · {len(ordered)} values, too many to list"
         self.count_label.setText(
-            f"<b>{len(coords):,}</b> of {len(rows):,} points · {label}{extra}"
+            f"<b>{len(coords):,}</b> of {self._total_points(rows):,} points · {label}{extra}"
         )
 
     def _legend_limit(self) -> int:
@@ -2686,7 +2824,7 @@ class EmbeddingExplorer(QWidget):
                 reset_view=reset_view,
             )
             self.count_label.setText(
-                f"<b>{len(coords):,}</b> of {len(rows):,} points · "
+                f"<b>{len(coords):,}</b> of {self._total_points(rows):,} points · "
                 f"no measurements for these"
             )
             return
@@ -2711,7 +2849,7 @@ class EmbeddingExplorer(QWidget):
         unmeasured = int((~np.isfinite(values)).sum())
         note = f" · {unmeasured:,} unmeasured" if unmeasured else ""
         self.count_label.setText(
-            f"<b>{len(coords):,}</b> of {len(rows):,} points · {label} "
+            f"<b>{len(coords):,}</b> of {self._total_points(rows):,} points · {label} "
             f"{low:,.0f}–{high:,.0f}{note}"
         )
 
@@ -2804,6 +2942,17 @@ class EmbeddingExplorer(QWidget):
             background=self.background_box.currentData(),
             legend_entries=strip_entries,
         )
+        # render() just rebuilt every Facet from scratch (see GridView._clear
+        # in render()), so density/lasso state has to be reapplied to the NEW
+        # widgets exactly as the single-plot path already does above after
+        # its own set_points -- without this a toggle set before faceting,
+        # or before a redraw, would silently revert on the next one.
+        if self.density_box.isChecked():
+            for facet in self.grid.facets:
+                facet.scatter.set_density(True)
+        if self.scatter.lasso_enabled:
+            for facet in self.grid.facets:
+                facet.scatter.set_lasso(True)
         self._update_page_label()
         if skipped:
             self.status.emit(
@@ -2832,6 +2981,11 @@ class EmbeddingExplorer(QWidget):
 
     def _on_density_toggled(self, enabled: bool) -> None:
         self.scatter.set_density(enabled)
+        # Same structural gap set_grey_out already accounts for: self.scatter
+        # is hidden while the grid is faceted, so toggling only it left every
+        # facet showing points no matter what this control said.
+        for facet in self.grid.facets:
+            facet.scatter.set_density(enabled)
         # A legend of colours means nothing when colour encodes density.
         self.legend_box.setEnabled(not enabled)
         self.colour_box.setEnabled(not enabled)
@@ -2839,6 +2993,8 @@ class EmbeddingExplorer(QWidget):
 
     def _on_lasso_toggled(self, enabled: bool) -> None:
         self.scatter.set_lasso(enabled)
+        for facet in self.grid.facets:
+            facet.scatter.set_lasso(enabled)
         self.cluster_panel.set_lasso_active(enabled)
         if enabled:
             self.status.emit("click to start an outline, click again to close it")
@@ -3119,6 +3275,28 @@ class EmbeddingExplorer(QWidget):
                 "the joint embedding.",
             )
             return
+
+        # Inherit a resolver from the sources right away, if they are already
+        # resolved -- without this, a BRAND NEW joint entry (this exact
+        # combination has never itself been located before, so ResolverStore
+        # has nothing remembered for it yet) shows "not found" until the user
+        # opens Locate by hand, even though every source it was built from is
+        # already located. LocateAllDialog does this same fold lazily, on
+        # open; this is the same function, run eagerly at combine-time.
+        from .locate_all_dialog import _inherited_resolver
+
+        resolver_for = {
+            source.key: source.resolver
+            for source in chosen
+            if source.resolver is not None
+        }
+        for joint in entries_made:
+            result = _inherited_resolver(joint, resolver_for)
+            if result is not None:
+                resolver, _source_names = result
+                joint.resolver = resolver
+                joint.resolver_searched = True
+                self._remember_resolver(str(joint.dataset.directory), resolver)
 
         # The comparison partner is added first so it exists in the list,
         # then the primary one is added and switched to -- so Ctrl+Tab from

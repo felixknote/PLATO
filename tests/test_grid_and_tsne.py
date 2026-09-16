@@ -294,6 +294,56 @@ def test_expanded_label_clears_when_it_no_longer_exists(grid):
     assert grid.expanded_label is None
 
 
+def test_largest_first_keeps_one_sources_plates_together_in_order(grid):
+    """Regression: on a joint entry, "Largest first" used to sort every
+    facet by point count alone, so a real 6-screen combine produced plate
+    titles reading 09, 03, 10, 11, 08, 07, 05, 12, 04... -- unrelated
+    screens interleaved and no run of consecutive plate numbers anywhere.
+    Grouping by source dataset first (ranked by its own total size), then
+    ordering each source's plates numerically, fixes both."""
+    labels_and_sizes = {
+        "2026_07_CRISPRi · P2": 1556,
+        "2026_07_CRISPRi · P4": 1502,
+        "2026_07_CRISPRi · P1": 1488,
+        "2026_07_CRISPRi · P3": 1487,
+        "2025_12_CRISPRi · P2": 539,
+        "2025_12_CRISPRi · P1": 528,
+        "ABx_P5": 538,
+        "ABx_P1": 514,
+    }
+    coords, rows, colours = _points(n=sum(labels_and_sizes.values()))
+    values = np.asarray(
+        [label for label, n in labels_and_sizes.items() for _ in range(n)],
+        dtype=object,
+    )
+    groups, _ = build_groups(values)
+    grid.set_groups(groups)  # default sort: BY_SIZE
+
+    titles = [label for label, _ in grid._groups]
+    assert titles == [
+        "2026_07_CRISPRi · P1",
+        "2026_07_CRISPRi · P2",
+        "2026_07_CRISPRi · P3",
+        "2026_07_CRISPRi · P4",
+        "2025_12_CRISPRi · P1",
+        "2025_12_CRISPRi · P2",
+        "ABx_P1",
+        "ABx_P5",
+    ]
+
+
+def test_largest_first_without_disambiguation_is_unchanged(grid):
+    """A non-joint frame (or one where nothing collided) never carries the
+    disambiguation separator -- must behave exactly as the plain
+    size-then-name sort always did."""
+    coords, rows, colours = _points(n=300)
+    values = np.asarray(["A"] * 150 + ["B"] * 100 + ["C"] * 50, dtype=object)
+    groups, _ = build_groups(values)
+    grid.set_groups(groups)
+
+    assert [label for label, _ in grid._groups] == ["A", "B", "C"]
+
+
 def test_no_default_page_limit(grid):
     """The default must show every group at once -- paging is opt-in
     (test_many_groups_page_rather_than_shrink sets page_size explicitly),

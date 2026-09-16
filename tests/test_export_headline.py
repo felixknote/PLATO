@@ -329,3 +329,91 @@ def test_group_column_change_reaches_the_facet_switch(explorer):
     assert explorer._group_column == explorer.group_box.currentData()
     faceting = bool(explorer._group_column)
     assert explorer.grid.isVisibleTo(explorer) is faceting or not explorer.isVisible()
+
+
+# -- the count label's denominator ---------------------------------------------
+
+
+def test_count_label_shows_the_true_total_not_the_subsample_size(explorer):
+    """Regression: the count label compared against len(row_indices) -- the
+    PROJECTION's own row set -- so a max-points subsample made the label
+    always claim 100% of the dataset was shown. A real joint entry with a
+    ~25% cap active showed "26,208 of 26,208 points" for a 104,832-row
+    dataset. The denominator has to be dataset.n_points."""
+    from plato.data.projection import ProjectionParams, ProjectionResult
+
+    entry = _entry("A", ["gyrA", "ftsZ", "murA"], n=100)
+    explorer._add_entry(entry)
+
+    # Simulates a max_points subsample: the projection covers only 25 of the
+    # dataset's 100 real rows.
+    explorer.result = ProjectionResult(
+        coords=np.random.default_rng(0).normal(size=(25, 2)).astype(np.float32),
+        row_indices=np.arange(25),
+        params=ProjectionParams(),
+    )
+    explorer._redraw()
+
+    assert explorer.dataset.n_points == 100
+    assert "25" in explorer.count_label.text()
+    assert "100" in explorer.count_label.text()
+    assert "of 25" not in explorer.count_label.text()
+
+
+def _facet(explorer) -> None:
+    """Get the grid actually showing facets, not just the group column set.
+
+    Faceting a real dataset needs a computed projection -- _add_entry alone
+    leaves explorer.result at None, so _redraw draws nothing. A synthetic
+    ProjectionResult is enough; the point of these tests is what reaches the
+    facets once they exist, not the projection itself.
+    """
+    from plato.data.projection import ProjectionParams, ProjectionResult
+
+    entry = _entry("A", ["gyrA", "ftsZ", "murA"], n=64)
+    explorer._add_entry(entry)
+    explorer.group_box.setCurrentIndex(explorer.group_box.findData("plate"))
+    assert explorer._group_column == "plate"
+
+    params = ProjectionParams()
+    explorer.result = ProjectionResult(
+        coords=np.random.default_rng(0).normal(size=(64, 2)).astype(np.float32),
+        row_indices=np.arange(64),
+        params=params,
+    )
+    explorer._redraw()
+
+
+def test_density_reaches_every_facet(explorer):
+    """Toggling density while faceted used to do nothing visible: it only
+    called self.scatter.set_density, and self.scatter is the HIDDEN widget
+    while the grid is showing. Every facet's own scatter must switch too."""
+    _facet(explorer)
+    assert explorer.grid.facets
+
+    explorer.density_box.setChecked(True)
+
+    assert all(f.scatter.density_enabled for f in explorer.grid.facets)
+
+
+def test_density_state_survives_a_facet_redraw(explorer):
+    """Facets are destroyed and rebuilt on every redraw (GridView._clear in
+    render()) -- a toggle set before that redraw must still be applied to
+    the NEW widgets, not just the ones that existed when it was set."""
+    _facet(explorer)
+    explorer.density_box.setChecked(True)
+
+    explorer._redraw()
+
+    assert explorer.grid.facets
+    assert all(f.scatter.density_enabled for f in explorer.grid.facets)
+
+
+def test_lasso_reaches_every_facet(explorer):
+    """Same gap as density: lasso mode only ever reached self.scatter."""
+    _facet(explorer)
+    assert explorer.grid.facets
+
+    explorer.cluster_panel.lasso_button.setChecked(True)
+
+    assert all(f.scatter.lasso_enabled for f in explorer.grid.facets)

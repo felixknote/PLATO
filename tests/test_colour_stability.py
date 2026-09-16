@@ -91,3 +91,37 @@ def test_universe_empty_for_missing_or_blank_column():
     explorer = _explorer_with_frame(frame)
     assert explorer._colour_universe(None) == []
     assert explorer._colour_universe("not_a_column") == []
+
+
+# -- palette size: colours must not repeat before 30 conditions ---------------
+
+
+def test_the_owned_categorical_palettes_have_30_colours():
+    """A CRISPRi screen's genes plus its non-targeting controls is exactly
+    the case that used to wrap well before every value had its own colour --
+    see palettes.py's own comment on why 30."""
+    from plato.views import palettes
+
+    for key in ("plato", "bright", "deep"):
+        palette = palettes.get(key)
+        assert len(palette.colours) == 30, (
+            f"{key} has {len(palette.colours)} colours, not 30"
+        )
+
+
+def test_30_distinct_values_get_30_distinct_colours():
+    values = [f"gene_{i}" for i in range(30)]
+    mapping = categorical_colours(values)
+    assert len(set(mapping.values())) == 30, (
+        "some of 30 distinct values shared a colour -- exactly what a "
+        "30-colour palette exists to avoid"
+    )
+
+
+def test_the_31st_value_is_where_wrapping_finally_starts():
+    values = [f"gene_{i}" for i in range(31)]
+    mapping = categorical_colours(values)
+    # The 31st value (index 30) must repeat the very first value's colour --
+    # confirms wrapping starts exactly at 30, not earlier or later.
+    assert mapping["gene_30"] == mapping["gene_0"]
+    assert len(set(mapping.values())) == 30

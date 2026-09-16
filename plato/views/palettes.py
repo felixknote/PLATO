@@ -56,11 +56,30 @@ class Palette:
 #
 # The rule this encodes: a hue the interface uses to mean something is not
 # available to the data. Adding a colour here means re-checking that.
+#
+# Extended from 20 to 30 (indices 20-29) so a ~30-condition legend -- a
+# CRISPRi screen's genes plus its non-targeting controls is the case that
+# motivated this -- does not wrap before every value has its own colour. The
+# original 20 are UNCHANGED (nothing already shipped moves); the new 10 sit
+# at the midpoint of the ten widest remaining gaps between the original
+# hues, chosen greedily and re-measured after each pick. Doubling density in
+# the same hue space (minus the chrome exclusion) necessarily tightens
+# separation -- the ten new entries land 8-20 deg from their nearest
+# original neighbour, down from the original set's own ~19 deg claim (which,
+# re-measured with the same method used here, is actually 2.9 deg between
+# #e8a33d and #d9a05b -- two ALREADY-SHIPPED entries, not something this
+# extension introduced). To keep hue-adjacent pairs distinguishable anyway,
+# the new entries alternate between two lightness/saturation "rings" --
+# lighter/pastel-leaning and deeper/bold-leaning -- the same device Tableau20
+# and Vega's category20 use for exactly this problem, so two categories that
+# land hue-close still separate by brightness.
 _PLATO = (
     "#4a90d9", "#e8a33d", "#4fc376", "#e2647a", "#a98bdc",
     "#8fc866", "#e07b53", "#b85bd4", "#90d98c", "#c2b34a",
     "#7f9cd4", "#d4735a", "#6cc3a9", "#c98fac", "#9ab84f",
     "#766fc9", "#d9a05b", "#8d9ee0", "#b5cc5e", "#df8f8f",
+    "#b481da", "#24db3e", "#96da81", "#24db83", "#d7da81",
+    "#db2462", "#b3da81", "#4d24db", "#8186da", "#dbab24",
 )
 
 # Okabe & Ito (2008), the standard colour-blind-safe qualitative set. Eight
@@ -93,9 +112,19 @@ _TABLEAU = (
 # worse for being more saturated. Moved on the same rule; the result keeps a
 # 19 deg margin from both chrome hues and a 16 deg minimum inside the scale,
 # which is what the scale already had between entries 1 and 6.
+#
+# Extended to 30 alongside _PLATO and _DEEP (see _PLATO's own comment for
+# why and the method). This set had only ever reached 10 entries -- indices
+# 10-29 are new, generated straight from _PLATO's own hues at those same
+# positions (not hand-tuned independently, unlike the original 10), pushed
+# to this set's higher-saturation, lighter, dark-background character.
 _BRIGHT = (
     "#66c2ff", "#ffb347", "#5ee6a8", "#ff7b93", "#c9a0ff",
     "#a8e05f", "#ff9d6e", "#7cf07a", "#a3aaf5", "#e0d24a",
+    "#7ba4f4", "#ff6942", "#7bf4d0", "#ff42a1", "#d2f47b",
+    "#5142ff", "#f4bd7b", "#4269ff", "#dbf47b", "#ff4242",
+    "#c07bf4", "#42ff5d", "#97f47b", "#42ffa4", "#eff47b",
+    "#ff4282", "#c0f47b", "#6c42ff", "#7b83f4", "#ffcd42",
 )
 
 # Deep-toned set for light/white backgrounds. _PLATO's mid-saturation hues
@@ -113,11 +142,16 @@ _BRIGHT = (
 # screen rather than merely darker. Regenerate with the same method (push
 # saturation, binary-search lightness against relative_luminance) rather than
 # hand-tuning a colour that reads dull again.
+#
+# Extended to 30 alongside _PLATO (indices 20-29, same method, same source
+# hues -- see _PLATO's own comment for why 30).
 _DEEP = (
     "#2991fd", "#d07c00", "#16a646", "#ff4e6d", "#a578f2",
     "#52a219", "#ff5512", "#d25bf5", "#1ca715", "#a29015",
     "#5f8eea", "#f4603a", "#20a37c", "#d76ca2", "#789c1e",
     "#8b83ea", "#d67806", "#6d89f5", "#7e9b11", "#f25f5f",
+    "#bc69fb", "#04a71b", "#2aa604", "#04a558", "#909604",
+    "#fa4f89", "#5da004", "#977bfc", "#7b84fc", "#b88805",
 )
 
 # -- sequential --------------------------------------------------------------
@@ -162,7 +196,7 @@ _PRGN = (
 
 PALETTES: tuple[Palette, ...] = (
     Palette("plato", "PLATO", CATEGORICAL, _PLATO,
-            "The app's own 20-colour qualitative scale."),
+            "The app's own 30-colour qualitative scale."),
     Palette("okabe_ito", "Okabe–Ito (colour-blind safe)", CATEGORICAL, _OKABE_ITO,
             "Eight colours that stay distinct under all common forms of "
             "colour vision deficiency. Publication default."),

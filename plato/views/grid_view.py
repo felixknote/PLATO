@@ -25,6 +25,7 @@ count stated and lets you step through.
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
@@ -300,7 +301,7 @@ class GridView(QWidget):
         facet column looks like.
         """
         if sort == BY_SIZE:
-            groups = sorted(groups, key=lambda g: (-len(g[1]), g[0]))
+            groups = _sort_by_source_then_size(groups)
         else:
             # series_key, not a plain string sort: "By name" on a custom
             # grouping like "Day 1".."Day 16" (or a plain plate facet, "P1"..
@@ -463,6 +464,20 @@ class GridView(QWidget):
         for facet in self.facets:
             facet.scatter.set_selection(rows, notify=False)
 
+    def reset_view(self) -> None:
+        """Re-fit every visible facet to its own points.
+
+        The toolbar's "Reset view" button used to be wired only to the
+        single-plot scatter, so it did nothing while the grid was showing --
+        the single scatter it reset was hidden and never the thing on
+        screen. Every facet gets its own autoRange rather than reapplying
+        the shared limits, since those describe the WHOLE dataset's extent
+        and "reset" here means "re-fit what I am looking at", matching what
+        the single-plot button already does.
+        """
+        for facet in self.facets:
+            facet.scatter.reset_view()
+
     def _clear(self) -> None:
         for facet in self.facets:
             self.grid.removeWidget(facet)
@@ -566,6 +581,56 @@ class GridView(QWidget):
         if self.facets:
             return self.facets[0].scatter.background_colour()
         return QColor(themes.current().plot_background)
+
+
+# The plate number at the END of a facet label -- "2025_12_CRISPRi · P1" and
+# "ABx_P1" both end in one. Deliberately anchored to the end, unlike
+# ordering.numeric_part's first-number-anywhere match: a real dataset name
+# routinely STARTS with a number of its own ("2026_07_CRISPRi"), which
+# numeric_part would take as the series number instead of the plate's,
+# scattering every dataset into its own group keyed by its start date.
+_TRAILING_NUMBER = re.compile(r"(\d+)\s*$")
+
+
+def _sort_by_source_then_size(
+    groups: list[tuple[str, np.ndarray]],
+) -> list[tuple[str, np.ndarray]]:
+    """"Largest first", but never interleaving unrelated sources.
+
+    A plain size sort on a joint entry's plate facets reads as scrambled --
+    disambiguated labels look like "2025_12_CRISPRi · P1", and point counts
+    across six real screens differ by only a handful of points plate to
+    plate, so "largest first" alone put 2026_07_CRISPRi's P2/P4/P1/P3 (sizes
+    1556/1502/1488/1487) ahead of a jump to a DIFFERENT dataset's P2, with no
+    two plates of the same screen adjacent and no run of consecutive plate
+    numbers anywhere.
+
+    Grouping key is everything before the label's trailing number -- "ABx_P1"
+    and "ABx_P5" never collided with anything so neither carries the " · "
+    disambiguation separator, but they are still the same screen's plates and
+    must count up together exactly like a disambiguated "2025_12_CRISPRi ·
+    P1" does. A label with no trailing number at all falls back to being its
+    own one-member group, keyed on the whole label.
+
+    Groups are ranked by their own total point count (ties broken by the
+    prefix's name), and each group's members by series_key -- so one
+    screen's plates sit together in ascending plate order, and the busiest
+    screen still leads.
+    """
+    sources: dict[str, list[tuple[str, np.ndarray]]] = {}
+    for label, indices in groups:
+        match = _TRAILING_NUMBER.search(label)
+        key = label[: match.start()] if match else label
+        sources.setdefault(key, []).append((label, indices))
+
+    ordered_sources = sorted(
+        sources.items(),
+        key=lambda item: (-sum(len(i) for _, i in item[1]), item[0]),
+    )
+    result: list[tuple[str, np.ndarray]] = []
+    for _source, members in ordered_sources:
+        result.extend(sorted(members, key=lambda g: series_key(g[0])))
+    return result
 
 
 def build_groups(

@@ -303,3 +303,8 @@ class Workspace:
 # any one export's metadata.
 EMBEDDING_COLUMN = "embedding"
 DATASET_COLUMN = "dataset"
+
+# How joint_projection.disambiguate a value shared by more than one source --
+# "<dataset> · <value>" -- so a facet-ordering pass can split it back apart
+# without a second, differently-spelled copy of this separator.
+DISAMBIGUATION_SEPARATOR = " · "

@@ -50,6 +50,7 @@ import pandas as pd
 from .embeddings import EmbeddingDataset
 from .workspace import (
     DATASET_COLUMN,
+    DISAMBIGUATION_SEPARATOR,
     EMBEDDING_COLUMN,
     SOURCE_JOINT,
     EmbeddingEntry,
@@ -246,7 +247,9 @@ def _disambiguate_shared_plate_names(frame: pd.DataFrame) -> None:
         return
     mask = non_empty & plates.isin(ambiguous)
     frame.loc[mask, PLATE] = (
-        frame.loc[mask, DATASET_COLUMN].astype(str) + " · " + plates[mask]
+        frame.loc[mask, DATASET_COLUMN].astype(str)
+        + DISAMBIGUATION_SEPARATOR
+        + plates[mask]
     )
 
 
