@@ -26,3 +26,45 @@ Amikacin,Ribosome
 Gentamicin,Ribosome
 Ampicillin,Cell wall (PBP 1)
 Tetracycline,Ribosome
+#
+# Added 2026-09-16, auditing "By antibiotic" legend coverage across all six
+# real exports (2025_12_CRISPRi, 2026_04_ABx, 2026_07_ABx, 2026_07_CRISPRi,
+# 2026_08_ABx, 2026_08_CRISPRi). Cross-referenced against Krentzel/Kho et al.
+# 2025 (bioRxiv 10.1101/2025.03.30.645928, "Deep learning recognises
+# antibiotic modes of action from brightfield images"), whose own 22-drug
+# reference panel and MoA taxonomy is what AI4AB's table already follows
+# (confirmed: that paper's Table 1 puts Cefepime in "Cell wall (PBP 3)",
+# matching AI4AB's own entry exactly) -- it does not cover Iclaprim or
+# Rifabutin, which are genuinely absent from both tables, not just misspelt.
+#
+# Two real drugs, not in AI4AB's table under ANY spelling:
+#   - Iclaprim: dihydrofolate reductase (DHFR) inhibitor, the same target as
+#     AI4AB's own Trimethoprim -- joins its "DNA synthesis" class rather
+#     than inventing a new one for what is mechanistically the same target.
+#     https://pubmed.ncbi.nlm.nih.gov/19257839/
+#   - Rifabutin: a rifamycin, inhibits bacterial RNA polymerase by binding
+#     its beta subunit -- the same target and class as AI4AB's own
+#     Rifampicin. https://www.ncbi.nlm.nih.gov/books/NBK557488/
+#
+# The rest below are NOT new drugs -- they are spelling/truncation variants
+# of drugs AI4AB's table already covers, which AnnotationTable's own
+# whitespace/case-insensitive matching does not bridge (a one-letter or
+# truncated difference is not the same as a formatting difference). Each
+# maps to the SAME class its AI4AB-spelled counterpart already has, so it is
+# a coverage fix, not a new classification:
+#   - Cefepim -> Cefepime's class, Cell wall (PBP 3) (2026_04/2026_08_ABx
+#     truncate the trailing "e").
+#   - Doxicyclin -> Doxycycline's class, Ribosome (2026_04/2026_08_ABx
+#     misspell it; 2026_07_ABx spells it correctly).
+#   - Clavulanic Acid -> Clavulanate's class, Cell wall (PBP 2) (same
+#     compound, "clavulanic acid" is the full chemical name AI4AB's table
+#     shortens to "Clavulanate").
+#   - Penicillin -> Penicillin G's class, Cell wall (PBP 1) (2026_04_ABx
+#     drops the "G"; there is only one penicillin in this panel, so the
+#     bare name is unambiguous).
+Iclaprim,DNA synthesis
+Rifabutin,RNA polymerase
+Cefepim,Cell wall (PBP 3)
+Doxicyclin,Ribosome
+Clavulanic Acid,Cell wall (PBP 2)
+Penicillin,Cell wall (PBP 1)

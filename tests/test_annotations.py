@@ -219,3 +219,54 @@ def test_shipped_drug_moa_additions_do_not_collide_with_ai4ab():
         f"drug_moa.csv repeats {overlap}, already in AI4AB's table -- "
         "either drop the duplicate or document why it corrects AI4AB"
     )
+
+
+def test_shipped_drug_moa_covers_iclaprim_and_rifabutin():
+    """The two drugs genuinely absent from AI4AB's table under any spelling
+    (unlike Cefepim/Doxicyclin/Clavulanic Acid/Penicillin below, which are
+    spelling variants of drugs AI4AB already has). Classified by their real
+    mechanism, cross-referenced against Krentzel/Kho et al. 2025's own MoA
+    taxonomy where it applied (it does not cover either of these two) and a
+    web search otherwise -- see drug_moa.csv's own comment for sources."""
+    from pathlib import Path
+
+    from plato.data.annotations import DEFAULT_MOA_CANDIDATES, load_default_moa
+
+    root = Path(__file__).resolve().parents[1]
+    if not (root / DEFAULT_MOA_CANDIDATES[0]).exists():
+        pytest.skip("no local drug_moa.csv shipped")
+
+    table = load_default_moa([root])
+    # Iclaprim: a DHFR inhibitor, same target as AI4AB's own Trimethoprim.
+    assert table.get("Iclaprim") == table.get("Trimethoprim") == "DNA synthesis"
+    # Rifabutin: a rifamycin, same target as AI4AB's own Rifampicin.
+    assert table.get("Rifabutin") == table.get("Rifampicin") == "RNA polymerase"
+
+
+def test_shipped_drug_moa_bridges_real_spelling_variants():
+    """Cefepim/Doxicyclin/Clavulanic Acid/Penicillin are how different real
+    exports spell drugs AI4AB's table already covers under a different
+    spelling -- AnnotationTable's own whitespace/case folding does not
+    bridge a genuine spelling difference, so each needs its own alias
+    entry, mapped to the SAME class as its AI4AB-spelled counterpart."""
+    from pathlib import Path
+
+    from plato.data.annotations import DEFAULT_MOA_CANDIDATES, load_default_moa
+
+    root = Path(__file__).resolve().parents[1]
+    if not (root / DEFAULT_MOA_CANDIDATES[0]).exists():
+        pytest.skip("no local drug_moa.csv shipped")
+    if not any((root / c).resolve().exists() for c in DEFAULT_MOA_CANDIDATES[1:]):
+        pytest.skip("AI4AB table not present on this machine")
+
+    table = load_default_moa([root])
+    assert table.get("Cefepim") == table.get("Cefepime")
+    assert table.get("Doxicyclin") == table.get("Doxycycline")
+    assert table.get("Clavulanic Acid") == table.get("Clavulanate")
+    assert table.get("Penicillin") == table.get("PenicillinG")
+    assert UNANNOTATED not in (
+        table.get("Cefepim"),
+        table.get("Doxicyclin"),
+        table.get("Clavulanic Acid"),
+        table.get("Penicillin"),
+    )

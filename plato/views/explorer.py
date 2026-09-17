@@ -349,6 +349,24 @@ def _choice_for(max_points: int | None, n_points: int) -> str:
     offered = [c for c in SUBSAMPLE_CHOICES if _percent_of(c) is not None]
     return min(offered, key=lambda c: abs((_percent_of(c) or 1) * 100 - wanted))
 
+
+def _dataset_list_label(directory: Path) -> str:
+    """What the Dataset dropdown shows for one discovered directory.
+
+    A fold_Plate_N directory's own name is ambiguous the moment more than
+    one Learned_Embeddings run exists -- every run produces the same six
+    fold_Plate_1..6 names, and this dropdown lists directories BEFORE
+    anything is loaded, so learned_embeddings.load_fold's own naming fix
+    (see its _display_name) never runs in time to help here. Prefixed with
+    the run folder's name the same way, so a fold reads as identifiable in
+    the list a user actually picks from, not only after they have opened it.
+    """
+    from ..data.learned_embeddings import display_name, is_fold_dir
+
+    if is_fold_dir(directory):
+        return display_name(directory)
+    return directory.name
+
 # Filter lists longer than this are searchable rather than fully listed.
 MAX_FILTER_VALUES = 120
 
@@ -739,6 +757,9 @@ class EmbeddingExplorer(QWidget):
         self._load_batch_failed: list[str] = []
         self._load_batch_pending = 0
         self._load_batch_last_directory: Path | None = None
+        self._load_batch_order: dict[Path, int] = {}
+        self._load_batch_base = 0
+        self._load_batch_settled_positions: set[int] = set()
 
         search_roots = [Path(__file__).resolve().parents[2]]
         # Layered, not first-match: a PLATO-local drug_moa.csv correction or
@@ -1476,7 +1497,7 @@ class EmbeddingExplorer(QWidget):
         self.dataset_box.blockSignals(True)
         self.dataset_box.clear()
         for directory in directories:
-            self.dataset_box.addItem(directory.name, str(directory))
+            self.dataset_box.addItem(_dataset_list_label(directory), str(directory))
         if getattr(self.session, "plates", []):
             from ..data.plate_features import LOADED_PLATES
 
@@ -1551,6 +1572,14 @@ class EmbeddingExplorer(QWidget):
         self._load_batch_failed: list[str] = []
         self._load_batch_pending = len(embeddings)
         self._load_batch_last_directory = embeddings[-1]
+        # Each directory's position in the SUBMITTED order, and how many of
+        # those positions have landed in the workspace so far -- together
+        # these turn "arrived 3rd" into "belongs at workspace index base+1",
+        # whatever order the thread pool actually finishes them in. See
+        # _on_load_task_finished.
+        self._load_batch_order = {directory: i for i, directory in enumerate(embeddings)}
+        self._load_batch_base = len(self.workspace.entries)
+        self._load_batch_settled_positions: set[int] = set()
         self.status.emit(f"loading {len(embeddings)} embedding(s)…")
 
         signals = _LoadSignals()
@@ -1563,10 +1592,21 @@ class EmbeddingExplorer(QWidget):
 
     def _on_load_task_finished(self, directory: Path, dataset, frame) -> None:
         self._load_batch_loaded.append(dataset)
-        # Register and apply immediately -- each entry becomes usable the
-        # moment its own load finishes, rather than all appearing at once
-        # only after the slowest file in the batch is done.
-        self._apply_loaded_dataset(dataset, frame, announce=False)
+        # Where this entry belongs: base offset (entries that existed before
+        # this batch started) plus how many EARLIER-submitted entries from
+        # this same batch have already landed -- not this task's own
+        # position, since an earlier one that is still loading must not be
+        # skipped over. Register and apply immediately rather than waiting
+        # for the whole batch, so each entry becomes usable the moment its
+        # own load finishes.
+        position = self._load_batch_order.get(directory)
+        if position is None:
+            index = None
+        else:
+            already = sum(1 for p in self._load_batch_settled_positions if p < position)
+            index = self._load_batch_base + already
+            self._load_batch_settled_positions.add(position)
+        self._apply_loaded_dataset(dataset, frame, announce=False, index=index)
         self._on_load_task_settled(directory)
 
     def _on_load_task_failed(self, directory: Path, message: str) -> None:
@@ -1799,7 +1839,7 @@ class EmbeddingExplorer(QWidget):
             self._set_message(f"Could not read this dataset:\n{exc}")
 
     def _apply_loaded_dataset(
-        self, dataset: EmbeddingDataset, frame, *, announce: bool
+        self, dataset: EmbeddingDataset, frame, *, announce: bool, index: int | None = None
     ) -> None:
         """The GUI-thread work once a dataset's vectors and frame exist.
 
@@ -1808,13 +1848,19 @@ class EmbeddingExplorer(QWidget):
         arrive here with the same two pure objects a _LoadTask produces, and
         from here on everything is workspace/widget state that must run on
         the GUI thread regardless of which path built them.
+
+        ``index``, from a batch load, is where this entry belongs in the
+        open-embeddings list -- the order the user PICKED it in, not the
+        order its background load happened to finish, which several
+        concurrent _LoadTasks make unpredictable. None for the single-file
+        path, which has no batch to order against and just appends.
         """
         self.compute_features_button.setVisible(False)
         self.dataset = dataset
         self.frame = frame
         self._invalidate_paths()
         self.resolver = self._start_resolving_images(frame)
-        self._register_entry(dataset, frame)
+        self._register_entry(dataset, frame, index=index)
         self._active_key = self.workspace.current_key
         self._update_source_label()
         self.result = None
@@ -2999,13 +3045,18 @@ class EmbeddingExplorer(QWidget):
         if enabled:
             self.status.emit("click to start an outline, click again to close it")
 
-    def _register_entry(self, dataset, frame, *, source=SOURCE_EXPORT) -> None:
+    def _register_entry(
+        self, dataset, frame, *, source=SOURCE_EXPORT, index: int | None = None
+    ) -> None:
         """Add the just-loaded dataset to the workspace and make it current.
 
         Loading the same directory twice is allowed on purpose -- an export's
         own vectors and descriptors computed from the same images are two
         embeddings of one dataset, and comparing them is exactly the kind of
         question the workspace exists for.
+
+        ``index`` is passed straight through to Workspace.add -- see there
+        for why a batch load needs it.
         """
         info = dict(dataset.run_info) if isinstance(dataset.run_info, dict) else {}
         entry = EmbeddingEntry(
@@ -3016,9 +3067,9 @@ class EmbeddingExplorer(QWidget):
             info=info,
         )
         entry.resolver = self.resolver
-        self._add_entry(entry)
+        self._add_entry(entry, index=index)
 
-    def _add_entry(self, entry: EmbeddingEntry) -> None:
+    def _add_entry(self, entry: EmbeddingEntry, *, index: int | None = None) -> None:
         """Add an already-built entry to the workspace and make it current.
 
         The lower-level primitive _register_entry and the joint-projection
@@ -3038,7 +3089,7 @@ class EmbeddingExplorer(QWidget):
         one being viewed instead of the one just added, so closing what
         LOOKED like a non-active row actually closed the one truly active.
         """
-        self.workspace.add(entry)
+        self.workspace.add(entry, index=index)
         self._sync_open_box()
         if self.workspace.current_key == entry.key and self._active_key != entry.key:
             self._switch_to(entry.key)

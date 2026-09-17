@@ -192,6 +192,9 @@ def test_finish_lands_on_the_last_submitted_directory_not_last_finished(app, exp
     explorer._load_batch_failed = []
     explorer._load_batch_pending = len(dirs)
     explorer._load_batch_last_directory = dirs[-1]  # "Third"
+    explorer._load_batch_order = {d: i for i, d in enumerate(dirs)}
+    explorer._load_batch_base = len(explorer.workspace.entries)
+    explorer._load_batch_settled_positions = set()
 
     signals = _LoadSignals()
     signals.loaded.connect(explorer._on_load_task_finished)
@@ -212,3 +215,68 @@ def test_finish_lands_on_the_last_submitted_directory_not_last_finished(app, exp
     active = explorer.workspace.current
     assert active is not None
     assert active.name == "Third"
+
+
+def test_open_embeddings_list_reads_in_submission_order_not_completion_order(
+    app, explorer, tmp_path
+):
+    """The regression this guards: the open-embeddings list used to just
+    reflect Workspace.add()'s append order, which is completion order for a
+    concurrent batch -- "seemingly random" once loads run in parallel.
+    Regardless of which of the three finishes first, the workspace's own
+    entry order must read First, Second, Third."""
+    dirs = [_write_dataset(tmp_path / name, n=10, dim=4) for name in ("First", "Second", "Third")]
+
+    explorer._load_batch_plates = []
+    explorer._load_batch_loaded = []
+    explorer._load_batch_failed = []
+    explorer._load_batch_pending = len(dirs)
+    explorer._load_batch_last_directory = dirs[-1]
+    explorer._load_batch_order = {d: i for i, d in enumerate(dirs)}
+    explorer._load_batch_base = len(explorer.workspace.entries)
+    explorer._load_batch_settled_positions = set()
+
+    signals = _LoadSignals()
+    signals.loaded.connect(explorer._on_load_task_finished)
+    signals.failed.connect(explorer._on_load_task_failed)
+    explorer._load_signals = signals
+
+    # Worst case for a naive append: completion order is the exact REVERSE
+    # of submission order.
+    for directory in [dirs[2], dirs[1], dirs[0]]:
+        _LoadTask(directory, explorer.moa_table, explorer.pathway_table, signals).run()
+        QApplication.processEvents()
+
+    assert [e.name for e in explorer.workspace.entries] == ["First", "Second", "Third"]
+
+
+def test_batch_inserts_after_entries_already_open(app, explorer, tmp_path):
+    """A batch loaded while something else is already open must APPEND
+    after it, not interleave before -- the base offset has to reflect the
+    workspace's size at the moment the batch started, not zero."""
+    pre_existing = _write_dataset(tmp_path / "AlreadyOpen", n=10, dim=4)
+    pre_signals = _LoadSignals()
+    pre_result = {}
+    pre_signals.loaded.connect(lambda d, ds, fr: pre_result.update(dataset=ds, frame=fr))
+    _LoadTask(pre_existing, explorer.moa_table, explorer.pathway_table, pre_signals).run()
+    explorer._apply_loaded_dataset(pre_result["dataset"], pre_result["frame"], announce=False)
+
+    dirs = [_write_dataset(tmp_path / name, n=10, dim=4) for name in ("A", "B")]
+    explorer._load_batch_plates = []
+    explorer._load_batch_loaded = []
+    explorer._load_batch_failed = []
+    explorer._load_batch_pending = len(dirs)
+    explorer._load_batch_last_directory = dirs[-1]
+    explorer._load_batch_order = {d: i for i, d in enumerate(dirs)}
+    explorer._load_batch_base = len(explorer.workspace.entries)
+    explorer._load_batch_settled_positions = set()
+
+    signals = _LoadSignals()
+    signals.loaded.connect(explorer._on_load_task_finished)
+    signals.failed.connect(explorer._on_load_task_failed)
+    explorer._load_signals = signals
+    for directory in [dirs[1], dirs[0]]:  # B finishes before A
+        _LoadTask(directory, explorer.moa_table, explorer.pathway_table, signals).run()
+        QApplication.processEvents()
+
+    assert [e.name for e in explorer.workspace.entries] == ["AlreadyOpen", "A", "B"]

@@ -54,10 +54,26 @@ ATC_INDUCTION_RE = re.compile(
     r"_(?P<state>plus|minus)ATC$"
 )
 
-# ABx condition: "<drug> <dose>x", e.g. "Ciprofloxacin 1x", "Penicillin G 0.25x".
-# The drug group is greedy up to the final dose token, so two-word drug names
-# ("Penicillin G", "Polymyxin B") stay whole.
-DRUG_DOSE_RE = re.compile(r"^(?P<drug>.+?)\s+(?P<dose>[\d.]+x)$")
+# ABx condition: "<drug> <dose>x" or "<drug>_<dose>x", e.g. "Ciprofloxacin 1x"
+# (space, most exports) and "Avibactam_0.25x" (underscore, 2026_04_ABx). The
+# drug group is non-greedy up to the LAST space-or-underscore before the dose
+# token, so two-word drug names keep their own internal space either way --
+# "Polymyxin B_0.25x" -> drug "Polymyxin B", not "Polymyxin" with "B" folded
+# into a garbled dose. Before this only the space form matched, so every
+# underscore-separated label fell through unparsed: the whole string became
+# the "drug" (89 near-duplicate values instead of ~22 real ones), dose was
+# empty, and MoA lookup failed since it is keyed on the bare drug name.
+DRUG_DOSE_RE = re.compile(r"^(?P<drug>.+?)[\s_]+(?P<dose>[\d.]+x)$")
+
+# A third ABx naming convention, seen on 2026_07_ABx: "<drug>/<dose>x", dose
+# itself sometimes a fraction -- "Avibactam/1/2x", "Avibactam/1/8x",
+# "Avibactam/1x". Not folded into DRUG_DOSE_RE above: that one already
+# treats "/" as an ordinary drug-name character (none of the real drug names
+# contain one, so this is unambiguous), and a fractional dose needs its own
+# optional second "/<denominator>" group DRUG_DOSE_RE has no equivalent of.
+# ordering.numeric_part already parses "1/8x" as a fraction (0.125) for
+# sorting, so the extracted dose string needs no further conversion here.
+DRUG_SLASH_DOSE_RE = re.compile(r"^(?P<drug>[^/]+)/(?P<dose>[\d.]+(?:/[\d.]+)?x)$")
 
 # Condition labels that are controls rather than perturbations. Matched
 # case-insensitively against the whole label after collapsing whitespace.
@@ -70,6 +86,14 @@ CONTROL_LABELS = {
     "wt nc": "WT (non-targeting gRNA)",
     "dmso": "Vehicle (DMSO)",
     "water": "Vehicle (water)",
+    # 2026_04_ABx's own name for its DMSO vehicle control (confirmed
+    # directly, not inferred from the label alone -- "drug_control" reads
+    # generically and other exports could plausibly mean something else by
+    # it). Before this it fell through to the last-resort branch, was
+    # treated as a real drug named "drug_control", and its 1,008 rows
+    # (8.3% of the dataset) showed up as their own fake antibiotic in the
+    # legend, unannotated in MoA, rather than as the DMSO control they are.
+    "drug_control": "Vehicle (DMSO)",
 }
 # CRISPRi non-targeting control strains, matched against the parsed gene.
 CONTROL_GENES = {
@@ -172,6 +196,14 @@ def parse_condition(label: object) -> Condition:
         )
 
     match = DRUG_DOSE_RE.match(text)
+    if match:
+        return Condition(
+            label=text,
+            drug=_clean(match.group("drug")),
+            concentration=match.group("dose"),
+        )
+
+    match = DRUG_SLASH_DOSE_RE.match(text)
     if match:
         return Condition(
             label=text,

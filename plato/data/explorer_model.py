@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .annotations import UNANNOTATED, AnnotationTable, parse_condition
+from .annotations import CONTROL, UNANNOTATED, AnnotationTable, parse_condition
 from . import plate_location
 from .embeddings import EmbeddingDataset
 from .image_lookup import (
@@ -53,6 +53,12 @@ IMAGE_PATH = "image_path"
 PREDICTED_LABEL = "predicted_label"
 PROB_TRUE = "prob_true"
 CORRECT = "correct"
+
+# What a control row shows for MoA/pathway, instead of UNANNOTATED. A
+# control genuinely has no mechanism or gene target -- that is the correct
+# answer, not a gap in the annotation table, so it must read differently
+# from a real drug/gene the table simply does not cover yet.
+CONTROL_LABEL = "Control"
 
 # Source columns that may carry the condition string, best first. Datasets
 # name it differently depending on which export wrote them.
@@ -103,8 +109,12 @@ COLOUR_FIELDS = (
     # A trained model's own predictions, once one exists to show -- grouped
     # with the biological fields above rather than plate geometry, since
     # "where does it fail" is a question about the condition, not the well.
+    # Correct/incorrect is deliberately NOT offered here (removed on
+    # request): it stays a FILTER_FIELDS entry below, where "show only the
+    # wrong predictions" is the useful operation -- colouring by it is a
+    # binary split that adds little over just colouring by the condition
+    # and filtering to mistakes.
     PREDICTED_LABEL,
-    CORRECT,
     PROB_TRUE,
     # Plate geometry last: these answer "where was it", not "what was in it",
     # and are what you reach for once a biological encoding looks suspicious.
@@ -323,10 +333,24 @@ def build_frame(
     # MoA annotates drugs; pathway annotates gene targets. Both are external
     # tables -- absent one, the column is present but entirely unannotated,
     # which is what keeps the dropdown honest rather than empty.
+    #
+    # A control row is checked FIRST and reads "Control" regardless of what
+    # the table says: it has no mechanism or gene target by definition, which
+    # is a real, known answer, not the same "nobody has annotated this yet"
+    # that UNANNOTATED means for an actual drug/gene the table doesn't cover.
+    # Conflating the two put every control in the same legend bucket as
+    # genuinely missing annotations, which is what made a MoA/pathway legend
+    # read as mostly gaps.
     moa = moa_table or AnnotationTable.empty()
     pathway = pathway_table or AnnotationTable.empty()
-    frame[MOA] = [moa.get(c.drug) if c.drug else UNANNOTATED for c in parsed]
-    frame[PATHWAY] = [pathway.get(c.gene) if c.gene else UNANNOTATED for c in parsed]
+    frame[MOA] = [
+        CONTROL_LABEL if c.role == CONTROL else (moa.get(c.drug) if c.drug else UNANNOTATED)
+        for c in parsed
+    ]
+    frame[PATHWAY] = [
+        CONTROL_LABEL if c.role == CONTROL else (pathway.get(c.gene) if c.gene else UNANNOTATED)
+        for c in parsed
+    ]
 
     # Where on the plate each point sat -- row, column, rings in from the
     # edge. Derived here rather than at each of the explorer's four

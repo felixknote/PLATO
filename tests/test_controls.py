@@ -62,6 +62,32 @@ def _frame(n: int = 96) -> pd.DataFrame:
     return frame
 
 
+# -- MoA/pathway for controls ---------------------------------------------
+
+
+def test_control_rows_read_control_not_unannotated_in_moa_and_pathway():
+    """A control genuinely has no mechanism or gene target -- that is a real,
+    known answer, not the same "nobody has annotated this yet" gap
+    UNANNOTATED means for a real drug/gene the table just does not cover.
+    Before this fix every control fell into UNANNOTATED, so a MoA or pathway
+    legend read as mostly gaps instead of naming the controls as controls."""
+    from plato.data.explorer_model import CONTROL_LABEL, MOA, PATHWAY
+
+    frame = _frame()
+    control_rows = frame[frame["condition"].isin(["WT NC", "DMSO"])]
+    treatment_rows = frame[frame["condition"].isin(["gyrA_1", "ftsZ_2"])]
+
+    assert (control_rows[MOA] == CONTROL_LABEL).all()
+    assert (control_rows[PATHWAY] == CONTROL_LABEL).all()
+    # Treatments are unaffected -- gyrA_1/ftsZ_2 have no MoA table entry in
+    # this fixture (no moa_table was passed to build_frame), so they read as
+    # UNANNOTATED, not "Control".
+    from plato.data.annotations import UNANNOTATED
+
+    assert (treatment_rows[MOA] == UNANNOTATED).all()
+    assert (treatment_rows[PATHWAY] == UNANNOTATED).all()
+
+
 # -- detection -----------------------------------------------------------------
 
 

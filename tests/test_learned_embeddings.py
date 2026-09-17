@@ -23,6 +23,7 @@ from plato.data.embeddings import EmbeddingError, discover_datasets, load_datase
 from plato.data.explorer_model import build_frame
 from plato.data.learned_embeddings import (
     discover_folds,
+    display_name,
     fold_name,
     is_fold_dir,
     load_fold,
@@ -110,6 +111,56 @@ def test_fold_name():
     assert fold_name(Path("not_a_fold")) is None
 
 
+def test_display_name_prefixes_with_the_run_folder():
+    """A fold's own name is ambiguous the moment more than one training run
+    exists: Felix reorganised Learned_Embeddings into one subfolder per run
+    (2025_12_CRISPRi/fold_Plate_1..6, 2026_04_ABx/fold_Plate_1..6), and two
+    RUNS now genuinely produce the identical fold name "fold_Plate_1"."""
+    a = Path("/data/Learned_Embeddings/2025_12_CRISPRi/fold_Plate_1")
+    b = Path("/data/Learned_Embeddings/2026_04_ABx/fold_Plate_1")
+    assert display_name(a) == "2025_12_CRISPRi · fold_Plate_1"
+    assert display_name(b) == "2026_04_ABx · fold_Plate_1"
+    assert display_name(a) != display_name(b)
+
+
+def test_display_name_falls_back_to_the_bare_name_at_a_drive_root():
+    """No real parent to prefix with -- must not crash or produce an empty
+    or malformed name."""
+    assert display_name(Path("fold_Plate_1")) == "fold_Plate_1"
+
+
+def test_load_fold_name_matches_display_name(tmp_path):
+    """load_fold's own default name (used when nothing else in the app
+    passes an explicit one) must be the same thing display_name computes,
+    not a second, independently-maintained formula that could drift from it."""
+    fold = tmp_path / "run_A" / "fold_Plate_1"
+    _make_fold(fold, n_images=4)
+
+    dataset = load_fold(fold)
+
+    assert dataset.name == display_name(fold)
+
+
+def test_dataset_dropdown_label_disambiguates_folds_before_loading(tmp_path):
+    """The Dataset dropdown lists directories BEFORE anything is loaded, so
+    load_fold's own naming fix never gets a chance to run for it -- the
+    dropdown needs the same fix independently, or a fold reads as ambiguous
+    right up until the moment it is picked."""
+    pytest.importorskip("PySide6")
+    from plato.views.explorer import _dataset_list_label
+
+    fold = tmp_path / "2025_12_CRISPRi" / "fold_Plate_1"
+    _make_fold(fold, n_images=4)
+    ordinary = tmp_path / "2026_07_ABx"
+    ordinary.mkdir()
+    (ordinary / "features_metadata.csv").write_text("a,b\n1,2\n")
+
+    assert _dataset_list_label(fold) == "2025_12_CRISPRi · fold_Plate_1"
+    # An ordinary (non-fold) export is untouched -- its own name is already
+    # unambiguous, and prefixing it would just be noise.
+    assert _dataset_list_label(ordinary) == "2026_07_ABx"
+
+
 def test_discover_folds_finds_all_siblings(tmp_path):
     run = tmp_path / "Dec25&Apr26 CRISPRi & ABx"
     for n in (1, 2, 3):
@@ -151,7 +202,10 @@ def test_load_fold_pools_positions_and_crops(tmp_path):
 
     assert dataset.n_points == 6
     assert dataset.n_dimensions == 8
-    assert dataset.name == "fold_Plate_1"
+    # Prefixed with the fold's own parent directory -- see display_name and
+    # test_display_name_prefixes_with_the_run_folder below for why a bare
+    # "fold_Plate_1" is not enough once more than one run exists.
+    assert dataset.name == f"{tmp_path.name} · fold_Plate_1"
 
 
 def test_load_fold_pooled_vector_is_the_mean(tmp_path):
@@ -237,6 +291,21 @@ def test_build_frame_carries_prediction_columns_through(tmp_path):
     # gene+guide, exactly like any other export's labels.
     assert (frame["drug"] != "").any()
     assert (frame["gene"] != "").any()
+
+
+def test_correct_is_filterable_but_not_a_colour_option(tmp_path):
+    """Removed from colour-by on request: colouring by a binary correct/
+    incorrect split added little over colouring by the condition and
+    filtering to mistakes, which is exactly what it stays useful for."""
+    from plato.data.explorer_model import CORRECT, colour_fields, filter_fields
+
+    fold = tmp_path / "fold_Plate_1"
+    _make_fold(fold, n_images=4)
+    dataset = load_fold(fold)
+    frame, _ = build_frame(dataset)
+
+    assert CORRECT not in colour_fields(frame)
+    assert CORRECT in filter_fields(frame)
 
 
 def test_build_frame_omits_prediction_columns_for_ordinary_datasets(tmp_path):

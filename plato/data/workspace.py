@@ -179,14 +179,26 @@ class Workspace:
     def entries(self) -> list[EmbeddingEntry]:
         return list(self._entries)
 
-    def add(self, entry: EmbeddingEntry, *, make_current: bool = True) -> EmbeddingEntry:
+    def add(
+        self, entry: EmbeddingEntry, *, make_current: bool = True, index: int | None = None
+    ) -> EmbeddingEntry:
         """Add an embedding. Loading the same directory twice is allowed.
 
         Two entries over one directory is a legitimate thing to want -- the
         export's vectors and descriptors computed from the same images, say --
         so this does not deduplicate. Identity is the entry key.
+
+        ``index``, when given, inserts rather than appends -- for a batch
+        load where several entries are read concurrently and can finish in
+        any order, but the open-embeddings list still has to read in the
+        order the user PICKED them, not the order disk I/O happened to
+        settle. Clamped to the current length, so a caller's positions
+        computed before other entries were removed never raise.
         """
-        self._entries.append(entry)
+        if index is None:
+            self._entries.append(entry)
+        else:
+            self._entries.insert(max(0, min(index, len(self._entries))), entry)
         if make_current or self._current is None:
             self._current = entry.key
         return entry

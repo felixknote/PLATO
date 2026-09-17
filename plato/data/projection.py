@@ -100,7 +100,7 @@ RANDOM_STATE = 1
 DEFAULT_PERPLEXITY = 50.0
 
 # Flat, not scaled with n -- see suggest() for why.
-DEFAULT_TSNE_ITER = 5000
+DEFAULT_TSNE_ITER = 2000
 # Early exaggeration is the phase that lets clusters separate before fine
 # structure is fitted. Held at 500 rather than scaled up with the main count:
 # it is a separation phase, not a convergence one, and openTSNE's own
@@ -307,7 +307,7 @@ def suggest(n_points: int, *, learned: bool = True) -> ProjectionParams:
     # which the runner enforces at use time regardless, but a SUGGESTED value
     # that already needs clamping the moment it is shown is not sensible.
     perplexity = min(DEFAULT_PERPLEXITY, max(2.0, (n_points - 1) / 3.0))
-    # Flat 5,000, not scaled with n. The previous n/25 formula topped out at
+    # Flat 2,000, not scaled with n. The previous n/25 formula topped out at
     # 1,500 and started at 750, which is above openTSNE's convergence floor
     # but well below where these layouts actually stop moving: Belkina et al.
     # (2019) measured default iteration counts costing >30 points of 1-NN
@@ -317,7 +317,7 @@ def suggest(n_points: int, *, learned: bool = True) -> ProjectionParams:
     # as a biological result.
     #
     # Flat rather than scaled because the thing being converged is the
-    # embedding, not the dataset: a small dataset at 5,000 iterations costs
+    # embedding, not the dataset: a small dataset at 2,000 iterations costs
     # seconds, and a large one needs at least as many, so scaling only ever
     # under-served the small case. Fewer is a preset away ("Fast
     # exploration") when the point is a first look rather than a figure.

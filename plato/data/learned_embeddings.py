@@ -167,6 +167,28 @@ def is_dataset_dir(directory: Path) -> bool:
     return is_fold_dir(directory)
 
 
+def display_name(directory: Path) -> str:
+    """What a fold shows as in the dataset list, absent an explicit name.
+
+    "fold_Plate_1" alone is ambiguous the moment more than one training run
+    exists -- every run under Learned_Embeddings produces the same six
+    fold_Plate_1..6 names, so two different runs' folds are indistinguishable
+    in the Open embeddings list and the "Data" section summary. Prefixing
+    with the run's own folder name (the fold's parent directory) is the
+    fix: "Dec25&Apr26 CRISPRi & ABx · fold_Plate_1" names both the run and
+    the plate, which is exactly what distinguishes it from another run's
+    fold_Plate_1.
+
+    Falls back to the bare fold name when the parent is not a real,
+    identifying folder (no parent at all, or a root drive) -- there being no
+    context worth prefixing is different from having lost it.
+    """
+    parent = directory.parent
+    if not parent.name:
+        return directory.name
+    return f"{parent.name} · {directory.name}"
+
+
 def load_fold(directory: Path, name: str | None = None) -> EmbeddingDataset:
     """Load one ``fold_Plate_N`` directory as an ``EmbeddingDataset``.
 
@@ -257,7 +279,7 @@ def load_fold(directory: Path, name: str | None = None) -> EmbeddingDataset:
     run_info.setdefault("model", f"trained classifier embedding ({vectors.shape[1]}-dim, {plate})")
 
     return EmbeddingDataset(
-        name=name or directory.name,
+        name=name or display_name(directory),
         directory=directory,
         vectors=vectors,
         frame=frame,

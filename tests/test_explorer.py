@@ -118,6 +118,27 @@ def dataset_dir(tmp_path):
         ("Polymyxin B 2x", "", "", "Polymyxin B", "2x", "treatment"),
         ("WT", "", "", "WT", "", "control"),
         ("WT NC", "", "", "WT NC", "", "control"),
+        # 2026_04_ABx's own convention: underscore, not a space, between
+        # drug and dose. Before the fix these fell all the way through to
+        # the last-resort branch, so the WHOLE string became the "drug" --
+        # 89 near-duplicate values on screen instead of ~22 real antibiotics.
+        ("Avibactam_0.25x", "", "", "Avibactam", "0.25x", "treatment"),
+        # Two-word drug name AND the underscore convention together -- the
+        # internal space in "Polymyxin B" must survive, only the underscore
+        # right before the dose is the separator.
+        ("Polymyxin B_0.25x", "", "", "Polymyxin B", "0.25x", "treatment"),
+        # 2026_07_ABx's own convention: slash, with a FRACTIONAL dose
+        # ("1/2x", not "0.5x"). ordering.numeric_part already parses this
+        # form for sorting; parse_condition just has to extract it whole.
+        ("Avibactam/1/2x", "", "", "Avibactam", "1/2x", "treatment"),
+        ("Avibactam/1/8x", "", "", "Avibactam", "1/8x", "treatment"),
+        ("Avibactam/1x", "", "", "Avibactam", "1x", "treatment"),
+        # 2026_04_ABx's own name for its DMSO vehicle control (confirmed
+        # directly by Felix, not inferred). Before this it fell through to
+        # the last-resort branch and was treated as a real drug named
+        # "drug_control" -- 1,008 rows (8.3% of the dataset) showed up as
+        # their own fake antibiotic, unannotated in MoA.
+        ("drug_control", "", "", "drug_control", "", "control"),
     ],
 )
 def test_parse_condition(label, gene, guide, drug, dose, role):
